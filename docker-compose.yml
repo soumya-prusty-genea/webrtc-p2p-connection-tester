@@ -1,0 +1,43 @@
+services:
+  webrtc-connection-tester:
+    build:
+      context: ./
+      dockerfile: docker/Dockerfile
+      additional_contexts: {}
+    pull_policy: if_not_present
+    
+    image: webrtc-connection-tester:local
+    container_name: webrtc-connection-tester
+    hostname: webrtc-connection-tester
+    env_file:
+      - .env
+      # Secrets (JWT_SECRET, TURN credentials, ...) live here and are git-ignored.
+      - path: .env.local
+        required: false
+    environment:
+      - APP_ENV=dev
+      - RUST_LOG=${RUST_LOG:-debug}
+      - RUST_BACKTRACE=1
+      - STATE_FILE_PATH=/data/sfu_state.json
+      - USE_TEST_STREAM=true
+    # network_mode: host
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    
+      
+    volumes:
+      - /tmp/zmq:/tmp/zmq
+      - ./sfu_state.json:/data/sfu_state.json
+    working_dir: /app
+    labels:
+      com.docker.compose.service: webrtc-connection-tester
+    networks:
+      - video-network
+
+networks:
+  video-network:
+    external: true
+    name: video-network

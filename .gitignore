@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+
+# Local secrets — never commit. Holds JWT_SECRET, TURN credentials, etc.
+.env.local
+
+# Local state / reports
+sfu_state.json
+/test-reports

@@ -1,0 +1,157 @@
+RecipeFormatVersion: "2020-01-25"
+ComponentName: "<COMPONENT_NAME>"
+ComponentVersion: "<COMPONENT_VERSION>"
+ComponentType: "aws.greengrass.generic"
+ComponentDescription: "WebRTC Connection Tester"
+ComponentPublisher: "Video"
+ComponentConfiguration:
+  DefaultConfiguration:
+    WEBRTC_CONNECTION_TESTER_IMAGE_URI: "<ECR_IMAGE_URI>"
+    BRIDGE_NET: "video-network"
+    STATE_VOLUME_NAME: "live-streamer-data"
+    APP_ENV: "<APP_ENV>"
+    RUST_LOG: "info"
+    RUST_BACKTRACE: "1"
+    SIGNALING_SERVER_URL: "<SIGNALING_SERVER_URL>"
+    SFU_ID: "<GATEWAY_UUID>"
+    MQTT_HOST: "emqx"
+    MQTT_PORT: "1883"
+    MQTT_USERNAME: ""
+    MQTT_PASSWORD: ""
+    MQTT_GATEWAY_UUID: "<GATEWAY_UUID>"
+    MQTT_COMMAND_TOPICS: ""
+    MQTT_COMMAND_ACTIONS: "camera.create_streaming,camera.delete_streaming"
+    MQTT_COMMAND_TOPIC_PREFIX: "video/cloud_to_edge"
+    MQTT_KEEP_ALIVE_SECS: "60"
+    WEBRTC_STUN_SERVER: "stun://stun.l.google.com:19302"
+    WEBRTC_TURN_SERVERS: ""
+    GATEWAY_UUID: "<GATEWAY_UUID>"
+    CUSTOMER_UUID: "<CUSTOMER_UUID>"
+    JWT_AUTH_ENABLED: "true"
+    JWT_SECRET: "<JWT_SECRET>"
+    JWT_EXPIRY_SECS: "86400"
+    STATE_FILE_PATH: "/data/sfu_state.json"
+    TIMESTAMP_SOURCE: "system"
+    TOTAL_STREAM_EGRESS_LOG_INTERVAL_SECS: "30"
+    STREAM_METRICS_LOG_INTERVAL_SECS : "30"
+    VIEWER_LIMIT_MODE: "gateway"
+    MAX_VIEWERS_PER_CAMERA: "10"
+    MAX_VIEWERS_PER_GATEWAY: "50"
+    DEFAULT_VIDEO_CODEC: "H264"
+    RECOVERY_WATCHDOG_INTERVAL_SECS: "5"
+    RECOVERY_WATCHDOG_STALLED_WINDOWS: "3"
+    RECOVERY_MIN_INPUT_FPS: "1.0"
+    RECOVERY_RESTART_COOLDOWN_SECS: "20"
+    RECOVERY_DTLS_WINDOW_SECS: "20"
+    RECOVERY_DTLS_WARNING_THRESHOLD: "3"
+    RECOVERY_TEST_FORCE_ZERO_OUTPUT_ENABLED: "false"
+    RECOVERY_TEST_FORCE_ZERO_OUTPUT_CYCLE_SECS: "30"
+    RECOVERY_TEST_FORCE_ZERO_OUTPUT_ACTIVE_SECS: "10"
+    accessControl:
+      aws.greengrass.ipc.pubsub:
+        <COMPONENT_NAME>:pubsub:1:
+          policyDescription: "Allows publishing metrics to CloudWatch component via IPC"
+          operations:
+            - "aws.greengrass#PublishToTopic"
+          resources:
+            - "cloudwatch/metric/put"
+ComponentDependencies:
+  aws.greengrass.DockerApplicationManager:
+    VersionRequirement: ">=2.0.0"
+    DependencyType: "HARD"
+  aws.greengrass.clientdevices.mqtt.EMQX:
+    VersionRequirement: ">=2.0.0"
+    DependencyType: "HARD"
+  aws.greengrass.clientdevices.mqtt.Bridge:
+    VersionRequirement: ">=2.0.0"
+    DependencyType: "HARD"
+  aws.greengrass.Cloudwatch:
+    VersionRequirement: ">=3.0.0"
+    DependencyType: "SOFT"
+Manifests:
+  - Platform:
+      os: "linux"
+    Artifacts:
+      - Uri: "docker:<ECR_IMAGE_URI>"
+        Unarchive: "NONE"
+        Permission:
+          Read: "OWNER"
+          Execute: "NONE"
+    Lifecycle:
+      Run:
+        Script: |
+          CONTAINER_NAME="webrtc-connection-tester"
+
+          docker rm -f ${CONTAINER_NAME} || true
+          IPC_SOCKET="$AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT"
+          IPC_SOCKET_DIR=$(dirname "$IPC_SOCKET")
+
+          test -S "$IPC_SOCKET" && echo "[Debug] IPC Socket exists" || echo "[Debug] IPC Socket NOT found"
+
+          IPC_SOCKET="$AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT"
+          IPC_SOCKET_DIR=$(dirname "$IPC_SOCKET")
+
+          test -S "$IPC_SOCKET" && echo "[Debug] IPC Socket exists" || echo "[Debug] IPC Socket NOT found"
+
+          docker run --restart unless-stopped \
+            --name ${CONTAINER_NAME} \
+            --network "{configuration:/BRIDGE_NET}" \
+            --ulimit nofile=65536:65536 \
+            -v /tmp/zmq:/tmp/zmq:rw \
+            -v {configuration:/STATE_VOLUME_NAME}:/data \
+            -v ${IPC_SOCKET_DIR}:${IPC_SOCKET_DIR}:rw \
+            -e AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT="$AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT" \
+            -e SVCUID="$SVCUID" \
+            -e AWS_IOT_THING_NAME="$AWS_IOT_THING_NAME" \
+            -e AWS_REGION="$AWS_REGION" \
+            -e TZ=UTC \
+            -e NO_COLOR=1 \
+            -e RUST_LOG_STYLE=never \
+            -e APP_ENV="{configuration:/APP_ENV}" \
+            -e RUST_LOG="{configuration:/RUST_LOG}" \
+            -e RUST_BACKTRACE="{configuration:/RUST_BACKTRACE}" \
+            -e SIGNALING_SERVER_URL="{configuration:/SIGNALING_SERVER_URL}" \
+            -e SFU_ID="{configuration:/SFU_ID}" \
+            -e MQTT_HOST="{configuration:/MQTT_HOST}" \
+            -e MQTT_PORT="{configuration:/MQTT_PORT}" \
+            -e MQTT_USERNAME="{configuration:/MQTT_USERNAME}" \
+            -e MQTT_PASSWORD="{configuration:/MQTT_PASSWORD}" \
+            -e MQTT_GATEWAY_UUID="{configuration:/MQTT_GATEWAY_UUID}" \
+            -e MQTT_COMMAND_TOPICS="{configuration:/MQTT_COMMAND_TOPICS}" \
+            -e MQTT_COMMAND_ACTIONS="{configuration:/MQTT_COMMAND_ACTIONS}" \
+            -e MQTT_COMMAND_TOPIC_PREFIX="{configuration:/MQTT_COMMAND_TOPIC_PREFIX}" \
+            -e MQTT_KEEP_ALIVE_SECS="{configuration:/MQTT_KEEP_ALIVE_SECS}" \
+            -e WEBRTC_STUN_SERVER="{configuration:/WEBRTC_STUN_SERVER}" \
+            -e WEBRTC_TURN_SERVERS="{configuration:/WEBRTC_TURN_SERVERS}" \
+            -e JWT_AUTH_ENABLED="{configuration:/JWT_AUTH_ENABLED}" \
+            -e GATEWAY_UUID="{configuration:/GATEWAY_UUID}" \
+            -e CUSTOMER_UUID="{configuration:/CUSTOMER_UUID}" \
+            -e JWT_SECRET="{configuration:/JWT_SECRET}" \
+            -e JWT_EXPIRY_SECS="{configuration:/JWT_EXPIRY_SECS}" \
+            -e STATE_FILE_PATH="{configuration:/STATE_FILE_PATH}" \
+            -e TIMESTAMP_SOURCE="{configuration:/TIMESTAMP_SOURCE}" \
+            -e STREAM_METRICS_LOG_INTERVAL_SECS="{configuration:/STREAM_METRICS_LOG_INTERVAL_SECS}" \
+            -e TOTAL_STREAM_EGRESS_LOG_INTERVAL_SECS="{configuration:/TOTAL_STREAM_EGRESS_LOG_INTERVAL_SECS}" \
+            -e VIEWER_LIMIT_MODE="{configuration:/VIEWER_LIMIT_MODE}" \
+            -e MAX_VIEWERS_PER_CAMERA="{configuration:/MAX_VIEWERS_PER_CAMERA}" \
+            -e MAX_VIEWERS_PER_GATEWAY="{configuration:/MAX_VIEWERS_PER_GATEWAY}" \
+            -e DEFAULT_VIDEO_CODEC="{configuration:/DEFAULT_VIDEO_CODEC}" \
+            -e RECOVERY_WATCHDOG_INTERVAL_SECS="{configuration:/RECOVERY_WATCHDOG_INTERVAL_SECS}" \
+            -e RECOVERY_WATCHDOG_STALLED_WINDOWS="{configuration:/RECOVERY_WATCHDOG_STALLED_WINDOWS}" \
+            -e RECOVERY_MIN_INPUT_FPS="{configuration:/RECOVERY_MIN_INPUT_FPS}" \
+            -e RECOVERY_RESTART_COOLDOWN_SECS="{configuration:/RECOVERY_RESTART_COOLDOWN_SECS}" \
+            -e RECOVERY_DTLS_WINDOW_SECS="{configuration:/RECOVERY_DTLS_WINDOW_SECS}" \
+            -e RECOVERY_DTLS_WARNING_THRESHOLD="{configuration:/RECOVERY_DTLS_WARNING_THRESHOLD}" \
+            -e RECOVERY_TEST_FORCE_ZERO_OUTPUT_ENABLED="{configuration:/RECOVERY_TEST_FORCE_ZERO_OUTPUT_ENABLED}" \
+            -e RECOVERY_TEST_FORCE_ZERO_OUTPUT_CYCLE_SECS="{configuration:/RECOVERY_TEST_FORCE_ZERO_OUTPUT_CYCLE_SECS}" \
+            -e RECOVERY_TEST_FORCE_ZERO_OUTPUT_ACTIVE_SECS="{configuration:/RECOVERY_TEST_FORCE_ZERO_OUTPUT_ACTIVE_SECS}" \
+            {configuration:/WEBRTC_CONNECTION_TESTER_IMAGE_URI}
+      Shutdown:
+        Script: |
+          CONTAINER_NAME="webrtc-connection-tester"
+          docker stop ${CONTAINER_NAME} || true
+          docker rm -f ${CONTAINER_NAME} || true
+      Cleanup:
+        Script: |
+          CONTAINER_NAME="webrtc-connection-tester"
+          docker rm -f ${CONTAINER_NAME} || true
