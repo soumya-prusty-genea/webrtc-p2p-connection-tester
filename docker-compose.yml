@@ -1,14 +1,14 @@
 services:
-  webrtc-connection-tester:
+  webrtc-p2p-connection-tester:
     build:
       context: ./
       dockerfile: docker/Dockerfile
       additional_contexts: {}
     pull_policy: if_not_present
     
-    image: webrtc-connection-tester:local
-    container_name: webrtc-connection-tester
-    hostname: webrtc-connection-tester
+    image: webrtc-p2p-connection-tester:local
+    container_name: webrtc-p2p-connection-tester
+    hostname: webrtc-p2p-connection-tester
     env_file:
       - .env
       # Secrets (JWT_SECRET, TURN credentials, ...) live here and are git-ignored.
@@ -33,7 +33,7 @@ services:
       - ./sfu_state.json:/data/sfu_state.json
     working_dir: /app
     labels:
-      com.docker.compose.service: webrtc-connection-tester
+      com.docker.compose.service: webrtc-p2p-connection-tester
     networks:
       - video-network
 

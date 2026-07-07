@@ -148,11 +148,11 @@
             <h3>Connection</h3>
             <div>
                 <label>Signaling server</label><br>
-                <input type="text" id="serverUrl" value="http://3.92.130.253:3000/viewer" style="width: 100%; max-width: 420px;" />
+                <input type="text" id="serverUrl" value="wss://signaling-gg-test.dev-sequr.io/viewer" style="width: 100%; max-width: 420px;" />
             </div>
             <div style="margin-top: 8px;">
                 <label>Camera UUID</label><br>
-                <input type="text" id="cameraUuid" value="CAM-TEST-001" />
+                <input type="text" id="cameraUuid" value="5ff19895-0d1e-497e-8a52-382dcb8ddf7d" />
                 <span class="hint">Must match a stream registered by the gateway (e.g. test-stream uses CAM-TEST-001).</span>
             </div>
             <div style="margin-top: 8px;">
@@ -171,6 +171,7 @@
         <section class="card">
             <h3>ICE Diagnostics</h3>
             <div class="status-row">
+                <span id="pillSignaling" class="pill info">Signaling: —</span>
                 <span id="pillIce" class="pill info">ICE: —</span>
                 <span id="pillPc" class="pill info">PC: —</span>
                 <span id="pillGathering" class="pill info">Gathering: —</span>
@@ -196,6 +197,62 @@
                 </div>
             </div>
 
+            <h3 style="margin-top:14px;">Connection Timing</h3>
+            <div class="grid-2">
+                <div class="metric">
+                    <div class="label">ICE connected (from offer)</div>
+                    <div class="value" id="timingIce">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">DTLS handshake (from offer)</div>
+                    <div class="value" id="timingDtls">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">SRTP established (from offer)</div>
+                    <div class="value" id="timingSrtp">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">First frame received (from offer)</div>
+                    <div class="value" id="timingFirstFrame">—</div>
+                </div>
+            </div>
+
+            <h3 style="margin-top:14px;">Media</h3>
+            <div class="grid-2">
+                <div class="metric">
+                    <div class="label">Video resolution</div>
+                    <div class="value" id="videoResolution">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Video codec</div>
+                    <div class="value" id="videoCodec">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Frame rate (fps)</div>
+                    <div class="value" id="videoFps">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Video bitrate</div>
+                    <div class="value" id="videoBitrate">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Audio codec</div>
+                    <div class="value" id="audioCodec">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Audio bitrate</div>
+                    <div class="value" id="audioBitrate">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Frames decoded / dropped</div>
+                    <div class="value" id="videoFrames">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Packet loss (video)</div>
+                    <div class="value" id="videoPacketLoss">—</div>
+                </div>
+            </div>
+
             <div id="selectedPairBox" class="selected-pair" style="display:none; margin-top:12px;">
                 <strong>Active candidate pair</strong>
                 <div id="selectedPairDetails" class="hint" style="margin-top:6px;"></div>
@@ -204,24 +261,24 @@
             <h3 style="margin-top:14px;">Local candidates (browser)</h3>
             <div class="scroll-box">
                 <table>
-                    <thead><tr><th>Type</th><th>Address</th><th>Protocol</th><th>Source</th></tr></thead>
-                    <tbody id="localCandidatesTable"><tr><td colspan="4" class="hint">Waiting for ICE gathering…</td></tr></tbody>
+                    <thead><tr><th>Type</th><th>Address</th><th>Protocol</th><th>Priority</th><th>Source</th></tr></thead>
+                    <tbody id="localCandidatesTable"><tr><td colspan="5" class="hint">Waiting for ICE gathering…</td></tr></tbody>
                 </table>
             </div>
 
             <h3 style="margin-top:14px;">Remote candidates (gateway)</h3>
             <div class="scroll-box">
                 <table>
-                    <thead><tr><th>Type</th><th>Address</th><th>Protocol</th><th>Source</th></tr></thead>
-                    <tbody id="remoteCandidatesTable"><tr><td colspan="4" class="hint">Waiting for remote ICE…</td></tr></tbody>
+                    <thead><tr><th>Type</th><th>Address</th><th>Protocol</th><th>Priority</th><th>Source</th></tr></thead>
+                    <tbody id="remoteCandidatesTable"><tr><td colspan="5" class="hint">Waiting for remote ICE…</td></tr></tbody>
                 </table>
             </div>
 
             <h3 style="margin-top:14px;">Candidate pairs</h3>
             <div class="scroll-box">
                 <table>
-                    <thead><tr><th>State</th><th>Local</th><th>Remote</th><th>RTT</th><th>Notes</th></tr></thead>
-                    <tbody id="pairsTable"><tr><td colspan="5" class="hint">Stats appear after ICE negotiation starts.</td></tr></tbody>
+                    <thead><tr><th>Result</th><th>Local</th><th>Remote</th><th>RTT</th><th>Received</th><th>Sent</th><th>Mbps in/out</th><th>Notes</th></tr></thead>
+                    <tbody id="pairsTable"><tr><td colspan="8" class="hint">Stats appear after ICE negotiation starts.</td></tr></tbody>
                 </table>
             </div>
 
@@ -242,9 +299,15 @@
         let statsTimer = null;
         let iceConnectedAt = null;
         let offerReceivedAt = null;
+        let dtlsConnectedAt = null;
+        let srtpEstablishedAt = null;
+        let firstFrameAt = null;
 
         const localCandidates = [];
         const remoteCandidates = [];
+        const prevPairStats = {};
+        let prevInboundVideoStats = null;
+        let prevInboundAudioStats = null;
 
         function getCameraUuid() {
             return document.getElementById('cameraUuid').value.trim() || cameraUuid;
@@ -325,6 +388,7 @@
                 '<td class="' + candidateTypeClass(c.type) + '">' + type + '</td>' +
                 '<td>' + addr + related + '</td>' +
                 '<td>' + (c.protocol || '').toUpperCase() + '</td>' +
+                '<td>' + (c.priority || '—') + '</td>' +
                 '<td>' + source + '</td>' +
                 '</tr>';
         }
@@ -334,10 +398,10 @@
             const remoteBody = document.getElementById('remoteCandidatesTable');
             localBody.innerHTML = localCandidates.length
                 ? localCandidates.map(function(c) { return formatCandidateRow(c, 'browser'); }).join('')
-                : '<tr><td colspan="4" class="hint">No local candidates yet.</td></tr>';
+                : '<tr><td colspan="5" class="hint">No local candidates yet.</td></tr>';
             remoteBody.innerHTML = remoteCandidates.length
                 ? remoteCandidates.map(function(c) { return formatCandidateRow(c, 'gateway'); }).join('')
-                : '<tr><td colspan="4" class="hint">No remote candidates yet.</td></tr>';
+                : '<tr><td colspan="5" class="hint">No remote candidates yet.</td></tr>';
         }
 
         function recordLocalCandidate(candidateStr) {
@@ -462,8 +526,11 @@
             const stats = await peerConnection.getStats();
             const candidates = {};
             const pairs = [];
+            const codecs = {};
             let selectedPairId = null;
             let transport = null;
+            let inboundVideo = null;
+            let inboundAudio = null;
 
             stats.forEach(function(report) {
                 if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
@@ -473,8 +540,42 @@
                 } else if (report.type === 'transport' && report.selectedCandidatePairId) {
                     transport = report;
                     selectedPairId = report.selectedCandidatePairId;
+                } else if (report.type === 'codec') {
+                    codecs[report.id] = report;
+                } else if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                    inboundVideo = report;
+                } else if (report.type === 'inbound-rtp' && report.kind === 'audio') {
+                    inboundAudio = report;
                 }
             });
+
+            if (!dtlsConnectedAt) {
+                var dtlsTransport = null;
+                var receivers = peerConnection.getReceivers ? peerConnection.getReceivers() : [];
+                for (var ri = 0; ri < receivers.length; ri++) {
+                    if (receivers[ri].transport && receivers[ri].transport.state) {
+                        dtlsTransport = receivers[ri].transport;
+                        break;
+                    }
+                }
+                if (dtlsTransport && dtlsTransport.state === 'connected') {
+                    dtlsConnectedAt = Date.now();
+                    log('DTLS connected');
+                }
+            }
+
+            if (!srtpEstablishedAt && inboundVideo && (inboundVideo.packetsReceived || 0) > 0) {
+                srtpEstablishedAt = Date.now();
+                log('SRTP established (first RTP packets decrypted)');
+            }
+
+            if (!firstFrameAt && inboundVideo && (inboundVideo.framesDecoded || 0) > 0) {
+                firstFrameAt = Date.now();
+                log('First frame decoded');
+            }
+
+            updateTimingDisplay();
+            updateMediaStats(inboundVideo, inboundAudio, codecs);
 
             const succeededPairs = pairs.filter(function(p) { return p.state === 'succeeded'; }).length;
             const failedPairs = pairs.filter(function(p) { return p.state === 'failed'; }).length;
@@ -487,7 +588,7 @@
 
             const pairsBody = document.getElementById('pairsTable');
             if (!pairs.length) {
-                pairsBody.innerHTML = '<tr><td colspan="5" class="hint">No candidate-pair stats yet.</td></tr>';
+                pairsBody.innerHTML = '<tr><td colspan="8" class="hint">No candidate-pair stats yet.</td></tr>';
             } else {
                 pairs.sort(function(a, b) {
                     if (a.selected) return -1;
@@ -496,6 +597,7 @@
                     if (b.state === 'succeeded') return 1;
                     return 0;
                 });
+                const now = Date.now();
                 pairsBody.innerHTML = pairs.map(function(pair) {
                     const local = candidates[pair.localCandidateId];
                     const remote = candidates[pair.remoteCandidateId];
@@ -504,16 +606,36 @@
                     const rtt = pair.currentRoundTripTime != null
                         ? Math.round(pair.currentRoundTripTime * 1000) + ' ms'
                         : '—';
+
+                    const bytesReceived = pair.bytesReceived || 0;
+                    const bytesSent = pair.bytesSent || 0;
+                    const prev = prevPairStats[pair.id];
+                    let mbpsIn = null, mbpsOut = null;
+                    if (prev) {
+                        const dtSec = (now - prev.t) / 1000;
+                        if (dtSec > 0) {
+                            mbpsIn = ((bytesReceived - prev.bytesReceived) * 8 / dtSec) / 1e6;
+                            mbpsOut = ((bytesSent - prev.bytesSent) * 8 / dtSec) / 1e6;
+                        }
+                    }
+                    prevPairStats[pair.id] = { t: now, bytesReceived: bytesReceived, bytesSent: bytesSent };
+
+                    const result = pair.state === 'succeeded' ? 'SUCCESS'
+                        : (pair.state === 'failed' ? 'FAILED' : (pair.state || '—').toUpperCase());
+
                     const notes = [];
                     if (pair.selected || pair.id === selectedPairId) notes.push('SELECTED');
                     if (pair.nominated) notes.push('nominated');
                     if (remote && isDockerBridgeIp(remote.address)) notes.push('remote Docker IP');
                     if (remote && isPrivateIp(remote.address) && remote.candidateType === 'host') notes.push('private host');
                     return '<tr>' +
-                        '<td class="' + pairStateClass(pair.state) + '">' + (pair.state || '—') + '</td>' +
+                        '<td class="' + pairStateClass(pair.state) + '">' + result + '</td>' +
                         '<td class="' + candidateTypeClass(local && local.candidateType) + '">' + localTxt + '</td>' +
                         '<td class="' + candidateTypeClass(remote && remote.candidateType) + '">' + remoteTxt + '</td>' +
                         '<td>' + rtt + '</td>' +
+                        '<td>' + formatBytes(bytesReceived) + '</td>' +
+                        '<td>' + formatBytes(bytesSent) + '</td>' +
+                        '<td>' + (mbpsIn != null ? (mbpsIn.toFixed(2) + ' / ' + mbpsOut.toFixed(2)) : '—') + '</td>' +
                         '<td>' + (notes.join(', ') || '—') + '</td>' +
                         '</tr>';
                 }).join('');
@@ -549,6 +671,91 @@
             });
         }
 
+        function formatElapsed(at) {
+            if (!offerReceivedAt || !at) return '—';
+            return (at - offerReceivedAt) + ' ms';
+        }
+
+        function updateTimingDisplay() {
+            document.getElementById('timingIce').textContent = formatElapsed(iceConnectedAt);
+            document.getElementById('timingDtls').textContent = formatElapsed(dtlsConnectedAt);
+            document.getElementById('timingSrtp').textContent = formatElapsed(srtpEstablishedAt);
+            document.getElementById('timingFirstFrame').textContent = formatElapsed(firstFrameAt);
+        }
+
+        function formatBytes(n) {
+            if (n == null) return '—';
+            if (n < 1024) return n + ' B';
+            if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+            return (n / (1024 * 1024)).toFixed(2) + ' MB';
+        }
+
+        function updateMediaStats(inboundVideo, inboundAudio, codecs) {
+            const now = Date.now();
+            const v = document.getElementById('video');
+
+            if (inboundVideo) {
+                const width = inboundVideo.frameWidth || v.videoWidth;
+                const height = inboundVideo.frameHeight || v.videoHeight;
+                document.getElementById('videoResolution').textContent = (width && height) ? (width + ' x ' + height) : '—';
+
+                const codec = codecs[inboundVideo.codecId];
+                document.getElementById('videoCodec').textContent = codec
+                    ? (codec.mimeType || '—') + (codec.sdpFmtpLine ? ' (' + codec.sdpFmtpLine + ')' : '')
+                    : '—';
+
+                document.getElementById('videoFps').textContent = inboundVideo.framesPerSecond != null
+                    ? inboundVideo.framesPerSecond + ' fps'
+                    : '—';
+
+                document.getElementById('videoFrames').textContent =
+                    (inboundVideo.framesDecoded != null ? inboundVideo.framesDecoded : '—') + ' decoded / ' +
+                    (inboundVideo.framesDropped != null ? inboundVideo.framesDropped : '—') + ' dropped';
+
+                const lost = inboundVideo.packetsLost || 0;
+                const received = inboundVideo.packetsReceived || 0;
+                const total = lost + received;
+                document.getElementById('videoPacketLoss').textContent = total
+                    ? lost + ' / ' + total + ' (' + ((lost / total) * 100).toFixed(1) + '%)'
+                    : '—';
+
+                if (prevInboundVideoStats) {
+                    const dtSec = (now - prevInboundVideoStats.t) / 1000;
+                    if (dtSec > 0) {
+                        const mbps = ((inboundVideo.bytesReceived - prevInboundVideoStats.bytesReceived) * 8 / dtSec) / 1e6;
+                        document.getElementById('videoBitrate').textContent = mbps.toFixed(2) + ' Mbps';
+                    }
+                }
+                prevInboundVideoStats = { t: now, bytesReceived: inboundVideo.bytesReceived || 0 };
+            } else {
+                document.getElementById('videoResolution').textContent = '—';
+                document.getElementById('videoCodec').textContent = '—';
+                document.getElementById('videoFps').textContent = '—';
+                document.getElementById('videoBitrate').textContent = '—';
+                document.getElementById('videoFrames').textContent = '—';
+                document.getElementById('videoPacketLoss').textContent = '—';
+                prevInboundVideoStats = null;
+            }
+
+            if (inboundAudio) {
+                const codec = codecs[inboundAudio.codecId];
+                document.getElementById('audioCodec').textContent = codec ? (codec.mimeType || '—') : '—';
+
+                if (prevInboundAudioStats) {
+                    const dtSec = (now - prevInboundAudioStats.t) / 1000;
+                    if (dtSec > 0) {
+                        const mbps = ((inboundAudio.bytesReceived - prevInboundAudioStats.bytesReceived) * 8 / dtSec) / 1e6;
+                        document.getElementById('audioBitrate').textContent = mbps.toFixed(3) + ' Mbps';
+                    }
+                }
+                prevInboundAudioStats = { t: now, bytesReceived: inboundAudio.bytesReceived || 0 };
+            } else {
+                document.getElementById('audioCodec').textContent = '—';
+                document.getElementById('audioBitrate').textContent = '—';
+                prevInboundAudioStats = null;
+            }
+        }
+
         function stateToPill(state) {
             if (state === 'connected' || state === 'completed') return 'ok';
             if (state === 'failed' || state === 'disconnected' || state === 'closed') return 'bad';
@@ -575,8 +782,11 @@
 
             socket = io(url, { transports: ['websocket', 'polling'], timeout: 5000, forceNew: true });
 
+            setPill('pillSignaling', 'Signaling: connecting…', 'warn');
+
             socket.on('connect', function() {
                 log('Connected');
+                setPill('pillSignaling', 'Signaling: connected', 'ok');
                 cameraUuid = getCameraUuid();
                 socket.emit('viewer_register', { viewer_id: viewerId, camera_uuid: cameraUuid });
                 log('Sent viewer_register for camera: ' + cameraUuid);
@@ -586,11 +796,13 @@
 
             socket.on('disconnect', function(reason) {
                 log('Disconnected: ' + reason);
+                setPill('pillSignaling', 'Signaling: disconnected (' + reason + ')', 'bad');
                 cleanup();
             });
 
             socket.on('connect_error', function(err) {
                 log('Connection error: ' + err.message);
+                setPill('pillSignaling', 'Signaling: error', 'bad');
                 cleanup();
             });
 
@@ -651,7 +863,11 @@
             remoteCandidates.length = 0;
             iceConnectedAt = null;
             offerReceivedAt = null;
+            dtlsConnectedAt = null;
+            srtpEstablishedAt = null;
+            firstFrameAt = null;
             renderCandidateTables();
+            updateTimingDisplay();
 
             peerConnection = new RTCPeerConnection({ iceServers: parseIceServers() });
 
@@ -790,6 +1006,13 @@
             setPill('pillPc', 'PC: —', 'info');
             setPill('pillGathering', 'Gathering: —', 'info');
             setPill('pillPair', 'Selected pair: —', 'info');
+            iceConnectedAt = null;
+            offerReceivedAt = null;
+            dtlsConnectedAt = null;
+            srtpEstablishedAt = null;
+            firstFrameAt = null;
+            updateTimingDisplay();
+            updateMediaStats(null, null, {});
         }
 
         function cleanup() {

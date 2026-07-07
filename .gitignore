@@ -7,3 +7,4 @@
 # Local state / reports
 sfu_state.json
 /test-reports
+.DS_Store
