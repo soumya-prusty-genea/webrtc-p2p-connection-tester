@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LiveKit Player</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0f1419; color: #e7ecf3; padding: 20px; }
+    #video-container {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 10px;
+      margin-top: 16px;
+    }
+    .participant {
+      position: relative;
+      background: #222;
+      border-radius: 8px;
+      overflow: hidden;
+      min-height: 200px;
+    }
+    .participant-name {
+      position: absolute;
+      top: 6px;
+      left: 6px;
+      background: rgba(0,0,0,0.6);
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      z-index: 2;
+    }
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .config {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      max-width: 760px;
+    }
+    .config label { font-size: 12px; color: #8b9cb3; display: block; margin-bottom: 4px; }
+    .config input {
+      width: 100%;
+      background: #0b1018;
+      border: 1px solid #2d3a4f;
+      color: #e7ecf3;
+      padding: 7px 10px;
+      border-radius: 6px;
+      box-sizing: border-box;
+    }
+    .controls { margin: 16px 0; }
+    button {
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      padding: 8px 16px;
+      margin-right: 10px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.secondary { background: #334155; }
+    #status { font-size: 13px; color: #8b9cb3; margin-top: 8px; white-space: pre-wrap; }
+    .hint { color: #8b9cb3; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>LiveKit Video Player</h1>
+  <p class="hint">Generates a LiveKit access token in-browser from API key/secret and joins room <code>room-&lt;camera uuid&gt;</code>.</p>
+
+  <div class="config">
+    <div>
+      <label>LiveKit URL (wss://)</label>
+      <input type="text" id="lk-url" value="wss://webrtc-livekit.dev-sequr.io/" />
+    </div>
+    <div>
+      <label>Camera UUID</label>
+      <input type="text" id="camera-uuid" value="CAM-TEST-001" />
+    </div>
+    <div>
+      <label>API Key</label>
+      <input type="text" id="lk-api-key" value="APIm822G6Vd2MMc" />
+    </div>
+    <div>
+      <label>API Secret</label>
+      <input type="password" id="lk-api-secret" value="5ge09pLAWFRsp5xlDAOqlVgjPOt1Ctwhs4fqB1nFz0t" />
+    </div>
+    <div>
+      <label>Identity (participant name)</label>
+      <input type="text" id="lk-identity" value="viewer" />
+    </div>
+    <div>
+      <label>Room name (derived)</label>
+      <input type="text" id="lk-room" value="" readonly />
+    </div>
+  </div>
+
+  <div class="controls">
+    <button id="join-btn">Join Room</button>
+    <button id="leave-btn" class="secondary" disabled>Leave Room</button>
+  </div>
+  <div id="status"></div>
+
+  <div id="video-container"></div>
+
+  <!-- Import LiveKit client from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.18.0/dist/livekit-client.umd.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

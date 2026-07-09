@@ -5,6 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WebRTC Live Viewer — ICE Diagnostics</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/2.5.0/socket.io.min.js"></script>
+    <!-- Capture every RTCPeerConnection instance BEFORE livekit-client loads, so we can
+         attach diagnostics to LiveKit's internal (minified) subscriber peer connection. -->
+    <script>
+        window.__pcInstances = [];
+        (function () {
+            const Orig = window.RTCPeerConnection || window.webkitRTCPeerConnection;
+            if (!Orig) return;
+            const Patched = function () {
+                const pc = new Orig(...arguments);
+                try { window.__pcInstances.push(pc); } catch (e) {}
+                return pc;
+            };
+            Patched.prototype = Orig.prototype;
+            window.RTCPeerConnection = Patched;
+            if (window.webkitRTCPeerConnection) window.webkitRTCPeerConnection = Patched;
+        })();
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.18.0/dist/livekit-client.umd.min.js"></script>
     <style>
         :root {
             --bg: #0f1419;
@@ -28,8 +46,8 @@
         }
         h1 { font-size: 1.35rem; margin: 0 0 4px; }
         .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 18px; }
-        .layout { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(360px, 1.1fr); gap: 16px; }
-        @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
+        .dual-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+        @media (max-width: 1100px) { .dual-layout { grid-template-columns: 1fr; } }
         .card {
             background: var(--panel);
             border: 1px solid var(--border);
@@ -45,6 +63,14 @@
             border-radius: 6px;
             margin: 4px 4px 4px 0;
         }
+        .uuid-input {
+            width: 100%;
+            max-width: 640px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 14px;
+            padding: 9px 12px;
+            letter-spacing: 0.3px;
+        }
         button {
             background: #2563eb;
             color: #fff;
@@ -58,13 +84,13 @@
         button.secondary { background: #334155; }
         video {
             width: 100%;
-            max-width: 640px;
+            max-width: 100%;
             background: #000;
             display: block;
             border-radius: 8px;
             margin-top: 10px;
         }
-        #log {
+        .log-box {
             font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
             font-size: 11px;
             max-height: 140px;
@@ -137,63 +163,72 @@
         }
         .hint { color: var(--muted); font-size: 12px; }
         .scroll-box { max-height: 220px; overflow: auto; }
+        .report-scroll { max-height: none; overflow: auto; }
     </style>
 </head>
 <body>
     <h1>WebRTC Live Viewer</h1>
-    <p class="subtitle">Watch a stream and inspect ICE candidate pairs, STUN reflexive addresses, and connectivity fixes.</p>
+    <p class="subtitle">Watch the local P2P gateway stream and the cloud LiveKit stream side by side, and compare connectivity/media diagnostics.</p>
 
-    <div class="layout">
+    <section class="card" style="margin-bottom:16px;">
+        <h3>Camera</h3>
+        <label>Camera UUID</label><br>
+        <input type="text" id="cameraUuid" value="5ff19895-0d1e-497e-8a52-382dcb8ddf7d" class="uuid-input" oninput="updateRoomPreview()" />
+        <div class="hint" style="margin-top:6px;">
+            Local channel: must match a stream registered by the local-live-streamer gateway.<br>
+            Cloud channel: derives the LiveKit room name <code>room-&lt;uuid&gt;</code> — currently <strong id="lk-lkRoomPreview">room-...</strong>.
+        </div>
+        <div style="margin-top: 12px;">
+            <button id="connectBothBtn" onclick="connectBoth()">Connect &amp; Watch (Local + Cloud)</button>
+            <button id="disconnectBothBtn" class="secondary" onclick="disconnectBoth()" disabled>Disconnect Both</button>
+            <span class="hint">Tries both the P2P gateway and the LiveKit cloud stream at once.</span>
+        </div>
+    </section>
+
+    <div class="dual-layout">
+        <!-- LOCAL / P2P GATEWAY CHANNEL -->
         <section class="card">
-            <h3>Connection</h3>
+            <h3>Local — P2P Gateway (local-live-streamer)</h3>
             <div>
                 <label>Signaling server</label><br>
-                <input type="text" id="serverUrl" value="wss://signaling-gg-test.dev-sequr.io/viewer" style="width: 100%; max-width: 420px;" />
-            </div>
-            <div style="margin-top: 8px;">
-                <label>Camera UUID</label><br>
-                <input type="text" id="cameraUuid" value="5ff19895-0d1e-497e-8a52-382dcb8ddf7d" />
-                <span class="hint">Must match a stream registered by the gateway (e.g. test-stream uses CAM-TEST-001).</span>
+                <input type="text" id="gw-serverUrl" value="wss://signaling-gg-test.dev-sequr.io/viewer" style="width: 100%;" />
             </div>
             <div style="margin-top: 8px;">
                 <label>STUN servers (comma-separated)</label><br>
-                <input type="text" id="stunServers" value="stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302" style="width: 100%; max-width: 420px;" />
+                <input type="text" id="gw-stunServers" value="stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302" style="width: 100%;" />
             </div>
             <div style="margin-top: 10px;">
-                <button id="connectBtn" onclick="connect()">Connect &amp; Watch</button>
-                <button id="disconnectBtn" class="secondary" onclick="disconnect()" disabled>Disconnect</button>
-                <button class="secondary" onclick="refreshIceDiagnostics()">Refresh ICE stats</button>
+                <button id="gw-connectBtn" onclick="gwChannel.connect()" style="display:none;">Connect &amp; Watch</button>
+                <button id="gw-disconnectBtn" class="secondary" onclick="gwChannel.disconnect()" disabled style="display:none;">Disconnect</button>
+                <button class="secondary" onclick="gwChannel.refreshIceDiagnostics()">Refresh ICE stats</button>
             </div>
-            <video id="video" controls autoplay muted playsinline></video>
-            <div id="log"></div>
-        </section>
+            <video id="gw-video" controls autoplay muted playsinline></video>
+            <div id="gw-log" class="log-box"></div>
 
-        <section class="card">
-            <h3>ICE Diagnostics</h3>
-            <div class="status-row">
-                <span id="pillSignaling" class="pill info">Signaling: —</span>
-                <span id="pillIce" class="pill info">ICE: —</span>
-                <span id="pillPc" class="pill info">PC: —</span>
-                <span id="pillGathering" class="pill info">Gathering: —</span>
-                <span id="pillPair" class="pill info">Selected pair: —</span>
+            <div class="status-row" style="margin-top:14px;">
+                <span id="gw-pillSignaling" class="pill info">Signaling: —</span>
+                <span id="gw-pillIce" class="pill info">ICE: —</span>
+                <span id="gw-pillPc" class="pill info">PC: —</span>
+                <span id="gw-pillGathering" class="pill info">Gathering: —</span>
+                <span id="gw-pillPair" class="pill info">Selected pair: —</span>
             </div>
 
             <div class="grid-2">
                 <div class="metric">
                     <div class="label">Your public address (STUN srflx)</div>
-                    <div class="value" id="localPublicAddr">—</div>
+                    <div class="value" id="gw-localPublicAddr">—</div>
                 </div>
                 <div class="metric">
                     <div class="label">Remote reachable address</div>
-                    <div class="value" id="remotePublicAddr">—</div>
+                    <div class="value" id="gw-remotePublicAddr">—</div>
                 </div>
                 <div class="metric">
                     <div class="label">Local host address</div>
-                    <div class="value" id="localHostAddr">—</div>
+                    <div class="value" id="gw-localHostAddr">—</div>
                 </div>
                 <div class="metric">
                     <div class="label">ICE connect time</div>
-                    <div class="value" id="iceConnectTime">—</div>
+                    <div class="value" id="gw-iceConnectTime">—</div>
                 </div>
             </div>
 
@@ -201,19 +236,19 @@
             <div class="grid-2">
                 <div class="metric">
                     <div class="label">ICE connected (from offer)</div>
-                    <div class="value" id="timingIce">—</div>
+                    <div class="value" id="gw-timingIce">—</div>
                 </div>
                 <div class="metric">
                     <div class="label">DTLS handshake (from offer)</div>
-                    <div class="value" id="timingDtls">—</div>
+                    <div class="value" id="gw-timingDtls">—</div>
                 </div>
                 <div class="metric">
                     <div class="label">SRTP established (from offer)</div>
-                    <div class="value" id="timingSrtp">—</div>
+                    <div class="value" id="gw-timingSrtp">—</div>
                 </div>
                 <div class="metric">
                     <div class="label">First frame received (from offer)</div>
-                    <div class="value" id="timingFirstFrame">—</div>
+                    <div class="value" id="gw-timingFirstFrame">—</div>
                 </div>
             </div>
 
@@ -221,48 +256,48 @@
             <div class="grid-2">
                 <div class="metric">
                     <div class="label">Video resolution</div>
-                    <div class="value" id="videoResolution">—</div>
+                    <div class="value" id="gw-videoResolution">—</div>
                 </div>
                 <div class="metric">
                     <div class="label">Video codec</div>
-                    <div class="value" id="videoCodec">—</div>
+                    <div class="value" id="gw-videoCodec">—</div>
                 </div>
                 <div class="metric">
                     <div class="label">Frame rate (fps)</div>
-                    <div class="value" id="videoFps">—</div>
+                    <div class="value" id="gw-videoFps">—</div>
                 </div>
                 <div class="metric">
                     <div class="label">Video bitrate</div>
-                    <div class="value" id="videoBitrate">—</div>
+                    <div class="value" id="gw-videoBitrate">—</div>
                 </div>
                 <div class="metric">
                     <div class="label">Audio codec</div>
-                    <div class="value" id="audioCodec">—</div>
+                    <div class="value" id="gw-audioCodec">—</div>
                 </div>
                 <div class="metric">
                     <div class="label">Audio bitrate</div>
-                    <div class="value" id="audioBitrate">—</div>
+                    <div class="value" id="gw-audioBitrate">—</div>
                 </div>
                 <div class="metric">
                     <div class="label">Frames decoded / dropped</div>
-                    <div class="value" id="videoFrames">—</div>
+                    <div class="value" id="gw-videoFrames">—</div>
                 </div>
                 <div class="metric">
                     <div class="label">Packet loss (video)</div>
-                    <div class="value" id="videoPacketLoss">—</div>
+                    <div class="value" id="gw-videoPacketLoss">—</div>
                 </div>
             </div>
 
-            <div id="selectedPairBox" class="selected-pair" style="display:none; margin-top:12px;">
+            <div id="gw-selectedPairBox" class="selected-pair" style="display:none; margin-top:12px;">
                 <strong>Active candidate pair</strong>
-                <div id="selectedPairDetails" class="hint" style="margin-top:6px;"></div>
+                <div id="gw-selectedPairDetails" class="hint" style="margin-top:6px;"></div>
             </div>
 
             <h3 style="margin-top:14px;">Local candidates (browser)</h3>
             <div class="scroll-box">
                 <table>
                     <thead><tr><th>Type</th><th>Address</th><th>Protocol</th><th>Priority</th><th>Source</th></tr></thead>
-                    <tbody id="localCandidatesTable"><tr><td colspan="5" class="hint">Waiting for ICE gathering…</td></tr></tbody>
+                    <tbody id="gw-localCandidatesTable"><tr><td colspan="5" class="hint">Waiting for ICE gathering…</td></tr></tbody>
                 </table>
             </div>
 
@@ -270,7 +305,7 @@
             <div class="scroll-box">
                 <table>
                     <thead><tr><th>Type</th><th>Address</th><th>Protocol</th><th>Priority</th><th>Source</th></tr></thead>
-                    <tbody id="remoteCandidatesTable"><tr><td colspan="5" class="hint">Waiting for remote ICE…</td></tr></tbody>
+                    <tbody id="gw-remoteCandidatesTable"><tr><td colspan="5" class="hint">Waiting for remote ICE…</td></tr></tbody>
                 </table>
             </div>
 
@@ -278,70 +313,177 @@
             <div class="scroll-box">
                 <table>
                     <thead><tr><th>Result</th><th>Local</th><th>Remote</th><th>RTT</th><th>Received</th><th>Sent</th><th>Mbps in/out</th><th>Notes</th></tr></thead>
-                    <tbody id="pairsTable"><tr><td colspan="8" class="hint">Stats appear after ICE negotiation starts.</td></tr></tbody>
+                    <tbody id="gw-pairsTable"><tr><td colspan="8" class="hint">Stats appear after ICE negotiation starts.</td></tr></tbody>
                 </table>
             </div>
 
             <div class="recommendations">
                 <strong>Recommendations</strong>
-                <div id="recommendations" class="hint">Connect to a stream to analyze connectivity.</div>
+                <div id="gw-recommendations" class="hint">Connect to a stream to analyze connectivity.</div>
+            </div>
+        </section>
+
+        <!-- CLOUD / LIVEKIT CHANNEL -->
+        <section class="card">
+            <h3>Cloud — LiveKit (cloud-live-streamer)</h3>
+            <div>
+                <label>LiveKit URL (wss://)</label><br>
+                <input type="text" id="lk-lkUrl" value="wss://webrtc-livekit.dev-sequr.io/" style="width: 100%;" />
+            </div>
+            <div style="margin-top: 8px;">
+                <label>LiveKit API Key</label><br>
+                <input type="text" id="lk-lkApiKey" value="APIm822G6Vd2MMc" style="width: 100%;" />
+            </div>
+            <div style="margin-top: 8px;">
+                <label>LiveKit API Secret</label><br>
+                <input type="password" id="lk-lkApiSecret" value="5ge09pLAWFRsp5xlDAOqlVgjPOt1Ctwhs4fqB1nFz0t" style="width: 100%;" />
+            </div>
+            <div style="margin-top: 8px;">
+                <label>Identity (participant name)</label><br>
+                <input type="text" id="lk-lkIdentity" value="viewer" />
+            </div>
+            <div style="margin-top: 10px;">
+                <button id="lk-connectBtn" onclick="lkChannel.connect()" style="display:none;">Connect &amp; Watch</button>
+                <button id="lk-disconnectBtn" class="secondary" onclick="lkChannel.disconnect()" disabled style="display:none;">Disconnect</button>
+                <button class="secondary" onclick="lkChannel.refreshIceDiagnostics()">Refresh ICE stats</button>
+            </div>
+            <video id="lk-video" controls autoplay muted playsinline></video>
+            <div id="lk-log" class="log-box"></div>
+
+            <div class="status-row" style="margin-top:14px;">
+                <span id="lk-pillSignaling" class="pill info">Signaling: —</span>
+                <span id="lk-pillIce" class="pill info">ICE: —</span>
+                <span id="lk-pillPc" class="pill info">PC: —</span>
+                <span id="lk-pillGathering" class="pill info">Gathering: —</span>
+                <span id="lk-pillPair" class="pill info">Selected pair: —</span>
+            </div>
+
+            <div class="grid-2">
+                <div class="metric">
+                    <div class="label">Your public address (STUN srflx)</div>
+                    <div class="value" id="lk-localPublicAddr">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Remote reachable address</div>
+                    <div class="value" id="lk-remotePublicAddr">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Local host address</div>
+                    <div class="value" id="lk-localHostAddr">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">ICE connect time</div>
+                    <div class="value" id="lk-iceConnectTime">—</div>
+                </div>
+            </div>
+
+            <h3 style="margin-top:14px;">Connection Timing</h3>
+            <div class="grid-2">
+                <div class="metric">
+                    <div class="label">ICE connected (from offer)</div>
+                    <div class="value" id="lk-timingIce">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">DTLS handshake (from offer)</div>
+                    <div class="value" id="lk-timingDtls">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">SRTP established (from offer)</div>
+                    <div class="value" id="lk-timingSrtp">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">First frame received (from offer)</div>
+                    <div class="value" id="lk-timingFirstFrame">—</div>
+                </div>
+            </div>
+
+            <h3 style="margin-top:14px;">Media</h3>
+            <div class="grid-2">
+                <div class="metric">
+                    <div class="label">Video resolution</div>
+                    <div class="value" id="lk-videoResolution">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Video codec</div>
+                    <div class="value" id="lk-videoCodec">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Frame rate (fps)</div>
+                    <div class="value" id="lk-videoFps">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Video bitrate</div>
+                    <div class="value" id="lk-videoBitrate">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Audio codec</div>
+                    <div class="value" id="lk-audioCodec">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Audio bitrate</div>
+                    <div class="value" id="lk-audioBitrate">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Frames decoded / dropped</div>
+                    <div class="value" id="lk-videoFrames">—</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Packet loss (video)</div>
+                    <div class="value" id="lk-videoPacketLoss">—</div>
+                </div>
+            </div>
+
+            <div id="lk-selectedPairBox" class="selected-pair" style="display:none; margin-top:12px;">
+                <strong>Active candidate pair</strong>
+                <div id="lk-selectedPairDetails" class="hint" style="margin-top:6px;"></div>
+            </div>
+
+            <h3 style="margin-top:14px;">Local candidates (browser)</h3>
+            <div class="scroll-box">
+                <table>
+                    <thead><tr><th>Type</th><th>Address</th><th>Protocol</th><th>Priority</th><th>Source</th></tr></thead>
+                    <tbody id="lk-localCandidatesTable"><tr><td colspan="5" class="hint">Waiting for ICE gathering…</td></tr></tbody>
+                </table>
+            </div>
+
+            <h3 style="margin-top:14px;">Remote candidates (SFU)</h3>
+            <div class="scroll-box">
+                <table>
+                    <thead><tr><th>Type</th><th>Address</th><th>Protocol</th><th>Priority</th><th>Source</th></tr></thead>
+                    <tbody id="lk-remoteCandidatesTable"><tr><td colspan="5" class="hint">Waiting for remote ICE…</td></tr></tbody>
+                </table>
+            </div>
+
+            <h3 style="margin-top:14px;">Candidate pairs</h3>
+            <div class="scroll-box">
+                <table>
+                    <thead><tr><th>Result</th><th>Local</th><th>Remote</th><th>RTT</th><th>Received</th><th>Sent</th><th>Mbps in/out</th><th>Notes</th></tr></thead>
+                    <tbody id="lk-pairsTable"><tr><td colspan="8" class="hint">Stats appear after ICE negotiation starts.</td></tr></tbody>
+                </table>
+            </div>
+
+            <div class="recommendations">
+                <strong>Recommendations</strong>
+                <div id="lk-recommendations" class="hint">Connect to a stream to analyze connectivity.</div>
             </div>
         </section>
     </div>
 
+    <section class="card" style="margin-top:16px;">
+        <h3>Side-by-side Report</h3>
+        <p class="hint">Live comparison of both channels — refreshes automatically while either is connected.</p>
+        <div class="report-scroll">
+            <table>
+                <thead><tr><th>Metric</th><th>Local (P2P Gateway)</th><th>Cloud (LiveKit)</th></tr></thead>
+                <tbody id="reportTable"></tbody>
+            </table>
+        </div>
+    </section>
+
     <script>
-        let socket = null;
-        let peerConnection = null;
-        let viewerId = 'viewer_' + Math.random().toString(36).substr(2, 9);
-        let streamDataRef = {};
-        let pendingIceCandidates = [];
-        let cameraUuid = 'CAM-TEST-001';
-        let statsTimer = null;
-        let iceConnectedAt = null;
-        let offerReceivedAt = null;
-        let dtlsConnectedAt = null;
-        let srtpEstablishedAt = null;
-        let firstFrameAt = null;
-
-        const localCandidates = [];
-        const remoteCandidates = [];
-        const prevPairStats = {};
-        let prevInboundVideoStats = null;
-        let prevInboundAudioStats = null;
-
-        function getCameraUuid() {
-            return document.getElementById('cameraUuid').value.trim() || cameraUuid;
-        }
-
-        function parseIceServers() {
-            const raw = document.getElementById('stunServers').value.trim();
-            if (!raw) return [{ urls: 'stun:stun.l.google.com:19302' }];
-            return raw.split(',').map(function(url) { return { urls: url.trim() }; }).filter(function(s) { return s.urls; });
-        }
-
-        function log(msg) {
-            const el = document.getElementById('log');
-            el.textContent += '[' + new Date().toLocaleTimeString() + '] ' + msg + '\n';
-            el.scrollTop = el.scrollHeight;
-        }
-
-        function setPill(id, text, cls) {
-            const el = document.getElementById(id);
-            el.textContent = text;
-            el.className = 'pill ' + (cls || 'info');
-        }
-
-        function candidateTypeClass(type) {
-            if (!type) return '';
-            return 'type-' + type;
-        }
-
-        function pairStateClass(state) {
-            if (!state) return '';
-            if (state === 'succeeded') return 'state-succeeded';
-            if (state === 'failed') return 'state-failed';
-            return 'state-in-progress';
-        }
+        // ---------------------------------------------------------------
+        // Pure helpers shared by both channels (no per-channel state)
+        // ---------------------------------------------------------------
 
         function parseCandidateLine(line) {
             if (!line) return null;
@@ -378,6 +520,18 @@
             return ip && (ip.startsWith('192.168.65.') || ip.startsWith('172.17.') || ip.startsWith('172.18.'));
         }
 
+        function candidateTypeClass(type) {
+            if (!type) return '';
+            return 'type-' + type;
+        }
+
+        function pairStateClass(state) {
+            if (!state) return '';
+            if (state === 'succeeded') return 'state-succeeded';
+            if (state === 'failed') return 'state-failed';
+            return 'state-in-progress';
+        }
+
         function formatCandidateRow(c, source) {
             const type = (c.type || 'unknown').toUpperCase();
             const addr = (c.address || '?') + ':' + (c.port || '?');
@@ -393,294 +547,21 @@
                 '</tr>';
         }
 
-        function renderCandidateTables() {
-            const localBody = document.getElementById('localCandidatesTable');
-            const remoteBody = document.getElementById('remoteCandidatesTable');
-            localBody.innerHTML = localCandidates.length
-                ? localCandidates.map(function(c) { return formatCandidateRow(c, 'browser'); }).join('')
-                : '<tr><td colspan="5" class="hint">No local candidates yet.</td></tr>';
-            remoteBody.innerHTML = remoteCandidates.length
-                ? remoteCandidates.map(function(c) { return formatCandidateRow(c, 'gateway'); }).join('')
-                : '<tr><td colspan="5" class="hint">No remote candidates yet.</td></tr>';
-        }
-
-        function recordLocalCandidate(candidateStr) {
-            const parsed = parseCandidateLine(candidateStr);
-            if (!parsed) return;
-            if (!localCandidates.some(function(c) { return c.raw === parsed.raw; })) {
-                localCandidates.push(parsed);
-                renderCandidateTables();
-            }
-        }
-
-        function recordRemoteCandidate(candidateStr) {
-            const parsed = parseCandidateLine(candidateStr);
-            if (!parsed) return;
-            if (!remoteCandidates.some(function(c) { return c.raw === parsed.raw; })) {
-                remoteCandidates.push(parsed);
-                renderCandidateTables();
-            }
-        }
-
-        function summarizeAddresses() {
-            const localHost = localCandidates.find(function(c) { return c.type === 'host'; });
-            const localSrflx = localCandidates.find(function(c) { return c.type === 'srflx'; });
-            const remoteHost = remoteCandidates.find(function(c) { return c.type === 'host'; });
-            const remoteSrflx = remoteCandidates.find(function(c) { return c.type === 'srflx'; });
-            const remoteRelay = remoteCandidates.find(function(c) { return c.type === 'relay'; });
-
-            document.getElementById('localHostAddr').textContent = localHost
-                ? localHost.address + ':' + localHost.port
-                : '—';
-            document.getElementById('localPublicAddr').textContent = localSrflx
-                ? localSrflx.address + ':' + localSrflx.port + ' (server reflexive via STUN)'
-                : (localCandidates.length ? 'No srflx yet — STUN may be blocked or gathering incomplete' : '—');
-            document.getElementById('remotePublicAddr').textContent = remoteSrflx
-                ? remoteSrflx.address + ':' + remoteSrflx.port
-                : (remoteRelay
-                    ? remoteRelay.address + ':' + remoteRelay.port + ' (TURN relay)'
-                    : (remoteHost ? remoteHost.address + ':' + remoteHost.port + ' (host only)' : '—'));
-        }
-
-        function buildRecommendations(ctx) {
-            const tips = [];
-            const ice = ctx.iceState;
-            const pc = ctx.pcState;
-
-            if (!peerConnection) {
-                return '<span class="hint">Connect to a stream to analyze connectivity.</span>';
-            }
-
-            if (ice === 'connected' || ice === 'completed') {
-                tips.push('ICE is connected. If video is still black, check codec/decoder or gateway media pipeline.');
-            }
-
-            if (ice === 'checking') {
-                tips.push('ICE is still checking pairs. Wait a few seconds; UDP hole punching can take time on strict NATs.');
-            }
-
-            if (ice === 'failed' || pc === 'failed') {
-                tips.push('<strong>ICE failed.</strong> Try the steps below in order.');
-            }
-
-            const hasLocalSrflx = localCandidates.some(function(c) { return c.type === 'srflx'; });
-            const hasLocalRelay = localCandidates.some(function(c) { return c.type === 'relay'; });
-            const hasRemoteRelay = remoteCandidates.some(function(c) { return c.type === 'relay'; });
-            const remotePrivateHosts = remoteCandidates.filter(function(c) {
-                return c.type === 'host' && isPrivateIp(c.address);
-            });
-            const remoteDocker = remoteCandidates.some(function(c) { return isDockerBridgeIp(c.address); });
-            const onlyHostPairs = !hasLocalSrflx && !hasLocalRelay && remoteCandidates.every(function(c) {
-                return c.type === 'host';
-            });
-
-            if (!hasLocalSrflx && localCandidates.length > 0) {
-                tips.push('Browser did not produce a <em>server reflexive (srflx)</em> candidate. STUN may be blocked by firewall, VPN, or corporate proxy. Allow outbound UDP to STUN (port 19302) or try another network.');
-            }
-
-            if (remoteDocker) {
-                tips.push('Gateway advertised a <strong>Docker internal IP</strong> (192.168.65.x / 172.18.x). Your browser cannot reach that address. Run the SFU/gateway on the host network (not Docker bridge), or configure <strong>TURN relay</strong> on both sides.');
-            }
-
-            if (remotePrivateHosts.length && !hasRemoteRelay) {
-                tips.push('Remote side only shared private host addresses (' + remotePrivateHosts.map(function(c) { return c.address; }).join(', ') + '). Unless you are on the same LAN, you need STUN srflx or TURN relay from the gateway.');
-            }
-
-            if (onlyHostPairs) {
-                tips.push('Only <em>host</em> candidates on both sides — direct LAN connectivity required. For cross-network viewing, enable STUN on the gateway and TURN if symmetric NAT is present.');
-            }
-
-            if ((ice === 'failed' || pc === 'failed') && !hasLocalRelay && !hasRemoteRelay) {
-                tips.push('No <strong>TURN relay</strong> candidates were used. Add TURN servers to both gateway and viewer ICE config for restrictive routers/NAT.');
-            }
-
-            if (ice === 'failed' || pc === 'failed') {
-                tips.push('Router / user actions that often fix ICE:');
-                tips.push('Disable AP/client isolation on Wi‑Fi (devices must talk to each other).');
-                tips.push('Enable UPnP or configure UDP port forwarding for the gateway media ports if hosting at home.');
-                tips.push('Avoid double NAT (modem + router both doing NAT); put gateway in DMZ only if you understand the security tradeoff.');
-                tips.push('Temporarily disable VPN, ad-blockers, or strict firewall rules blocking UDP.');
-                tips.push('If on corporate network, ask IT to allow UDP/WebRTC or use TURN over TLS (turns:).');
-            }
-
-            if (ctx.failedPairs > 0 && ctx.succeededPairs === 0) {
-                tips.push(ctx.failedPairs + ' candidate pair(s) failed with no successful pair. Typical causes: unreachable private IPs, UDP blocked, or NAT too strict.');
-            }
-
-            if (!tips.length) {
-                tips.push('No issues detected yet. Keep this panel open while connecting.');
-            }
-
-            return '<ul><li>' + tips.join('</li><li>') + '</li></ul>';
-        }
-
-        async function refreshIceDiagnostics() {
-            if (!peerConnection) return;
-
-            setPill('pillIce', 'ICE: ' + peerConnection.iceConnectionState, stateToPill(peerConnection.iceConnectionState));
-            setPill('pillPc', 'PC: ' + peerConnection.connectionState, stateToPill(peerConnection.connectionState));
-            setPill('pillGathering', 'Gathering: ' + peerConnection.iceGatheringState, 'info');
-
-            summarizeAddresses();
-
-            const stats = await peerConnection.getStats();
-            const candidates = {};
-            const pairs = [];
-            const codecs = {};
-            let selectedPairId = null;
-            let transport = null;
-            let inboundVideo = null;
-            let inboundAudio = null;
-
-            stats.forEach(function(report) {
-                if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
-                    candidates[report.id] = report;
-                } else if (report.type === 'candidate-pair') {
-                    pairs.push(report);
-                } else if (report.type === 'transport' && report.selectedCandidatePairId) {
-                    transport = report;
-                    selectedPairId = report.selectedCandidatePairId;
-                } else if (report.type === 'codec') {
-                    codecs[report.id] = report;
-                } else if (report.type === 'inbound-rtp' && report.kind === 'video') {
-                    inboundVideo = report;
-                } else if (report.type === 'inbound-rtp' && report.kind === 'audio') {
-                    inboundAudio = report;
-                }
-            });
-
-            if (!dtlsConnectedAt) {
-                var dtlsTransport = null;
-                var receivers = peerConnection.getReceivers ? peerConnection.getReceivers() : [];
-                for (var ri = 0; ri < receivers.length; ri++) {
-                    if (receivers[ri].transport && receivers[ri].transport.state) {
-                        dtlsTransport = receivers[ri].transport;
-                        break;
-                    }
-                }
-                if (dtlsTransport && dtlsTransport.state === 'connected') {
-                    dtlsConnectedAt = Date.now();
-                    log('DTLS connected');
-                }
-            }
-
-            if (!srtpEstablishedAt && inboundVideo && (inboundVideo.packetsReceived || 0) > 0) {
-                srtpEstablishedAt = Date.now();
-                log('SRTP established (first RTP packets decrypted)');
-            }
-
-            if (!firstFrameAt && inboundVideo && (inboundVideo.framesDecoded || 0) > 0) {
-                firstFrameAt = Date.now();
-                log('First frame decoded');
-            }
-
-            updateTimingDisplay();
-            updateMediaStats(inboundVideo, inboundAudio, codecs);
-
-            const succeededPairs = pairs.filter(function(p) { return p.state === 'succeeded'; }).length;
-            const failedPairs = pairs.filter(function(p) { return p.state === 'failed'; }).length;
-            const inProgressPairs = pairs.filter(function(p) {
-                return p.state === 'in-progress' || p.state === 'waiting';
-            }).length;
-
-            setPill('pillPair', 'Pairs: ' + succeededPairs + ' ok / ' + failedPairs + ' failed / ' + inProgressPairs + ' pending',
-                succeededPairs > 0 ? 'ok' : (failedPairs > 0 ? 'bad' : 'warn'));
-
-            const pairsBody = document.getElementById('pairsTable');
-            if (!pairs.length) {
-                pairsBody.innerHTML = '<tr><td colspan="8" class="hint">No candidate-pair stats yet.</td></tr>';
-            } else {
-                pairs.sort(function(a, b) {
-                    if (a.selected) return -1;
-                    if (b.selected) return 1;
-                    if (a.state === 'succeeded') return -1;
-                    if (b.state === 'succeeded') return 1;
-                    return 0;
-                });
-                const now = Date.now();
-                pairsBody.innerHTML = pairs.map(function(pair) {
-                    const local = candidates[pair.localCandidateId];
-                    const remote = candidates[pair.remoteCandidateId];
-                    const localTxt = local ? (local.candidateType + ' ' + local.address + ':' + local.port) : '?';
-                    const remoteTxt = remote ? (remote.candidateType + ' ' + remote.address + ':' + remote.port) : '?';
-                    const rtt = pair.currentRoundTripTime != null
-                        ? Math.round(pair.currentRoundTripTime * 1000) + ' ms'
-                        : '—';
-
-                    const bytesReceived = pair.bytesReceived || 0;
-                    const bytesSent = pair.bytesSent || 0;
-                    const prev = prevPairStats[pair.id];
-                    let mbpsIn = null, mbpsOut = null;
-                    if (prev) {
-                        const dtSec = (now - prev.t) / 1000;
-                        if (dtSec > 0) {
-                            mbpsIn = ((bytesReceived - prev.bytesReceived) * 8 / dtSec) / 1e6;
-                            mbpsOut = ((bytesSent - prev.bytesSent) * 8 / dtSec) / 1e6;
-                        }
-                    }
-                    prevPairStats[pair.id] = { t: now, bytesReceived: bytesReceived, bytesSent: bytesSent };
-
-                    const result = pair.state === 'succeeded' ? 'SUCCESS'
-                        : (pair.state === 'failed' ? 'FAILED' : (pair.state || '—').toUpperCase());
-
-                    const notes = [];
-                    if (pair.selected || pair.id === selectedPairId) notes.push('SELECTED');
-                    if (pair.nominated) notes.push('nominated');
-                    if (remote && isDockerBridgeIp(remote.address)) notes.push('remote Docker IP');
-                    if (remote && isPrivateIp(remote.address) && remote.candidateType === 'host') notes.push('private host');
-                    return '<tr>' +
-                        '<td class="' + pairStateClass(pair.state) + '">' + result + '</td>' +
-                        '<td class="' + candidateTypeClass(local && local.candidateType) + '">' + localTxt + '</td>' +
-                        '<td class="' + candidateTypeClass(remote && remote.candidateType) + '">' + remoteTxt + '</td>' +
-                        '<td>' + rtt + '</td>' +
-                        '<td>' + formatBytes(bytesReceived) + '</td>' +
-                        '<td>' + formatBytes(bytesSent) + '</td>' +
-                        '<td>' + (mbpsIn != null ? (mbpsIn.toFixed(2) + ' / ' + mbpsOut.toFixed(2)) : '—') + '</td>' +
-                        '<td>' + (notes.join(', ') || '—') + '</td>' +
-                        '</tr>';
-                }).join('');
-            }
-
-            const selected = pairs.find(function(p) { return p.selected || p.id === selectedPairId; });
-            const selectedBox = document.getElementById('selectedPairBox');
-            const selectedDetails = document.getElementById('selectedPairDetails');
-            if (selected) {
-                const local = candidates[selected.localCandidateId];
-                const remote = candidates[selected.remoteCandidateId];
-                selectedBox.style.display = 'block';
-                selectedDetails.innerHTML =
-                    '<div><strong>Local:</strong> ' + (local ? local.candidateType + ' ' + local.address + ':' + local.port + ' (' + local.protocol + ')' : '—') + '</div>' +
-                    '<div><strong>Remote:</strong> ' + (remote ? remote.candidateType + ' ' + remote.address + ':' + remote.port + ' (' + remote.protocol + ')' : '—') + '</div>' +
-                    '<div><strong>Pair state:</strong> ' + selected.state + (selected.nominated ? ' (nominated)' : '') + '</div>';
-            } else {
-                selectedBox.style.display = 'none';
-            }
-
-            if (iceConnectedAt) {
-                const ms = Date.now() - iceConnectedAt;
-                document.getElementById('iceConnectTime').textContent = ms + ' ms since ICE connected';
-            } else if (offerReceivedAt) {
-                document.getElementById('iceConnectTime').textContent = (Date.now() - offerReceivedAt) + ' ms since offer (not connected yet)';
-            }
-
-            document.getElementById('recommendations').innerHTML = buildRecommendations({
-                iceState: peerConnection.iceConnectionState,
-                pcState: peerConnection.connectionState,
-                succeededPairs: succeededPairs,
-                failedPairs: failedPairs
-            });
-        }
-
-        function formatElapsed(at) {
-            if (!offerReceivedAt || !at) return '—';
-            return (at - offerReceivedAt) + ' ms';
-        }
-
-        function updateTimingDisplay() {
-            document.getElementById('timingIce').textContent = formatElapsed(iceConnectedAt);
-            document.getElementById('timingDtls').textContent = formatElapsed(dtlsConnectedAt);
-            document.getElementById('timingSrtp').textContent = formatElapsed(srtpEstablishedAt);
-            document.getElementById('timingFirstFrame').textContent = formatElapsed(firstFrameAt);
+        // Used when we don't have raw SDP candidate lines (e.g. LiveKit manages its own
+        // RTCPeerConnection internally) — build the same shape from a getStats() report instead.
+        function candidateFromReport(report) {
+            return {
+                foundation: report.foundation || '',
+                component: report.component || '1',
+                protocol: report.protocol || '',
+                priority: report.priority || '',
+                address: report.address || report.ip || '',
+                port: report.port || '',
+                type: report.candidateType || 'unknown',
+                relatedAddress: report.relatedAddress || '',
+                relatedPort: report.relatedPort || '',
+                raw: 'report:' + report.candidateType + ' ' + (report.address || report.ip) + ':' + report.port + ' ' + report.protocol
+            };
         }
 
         function formatBytes(n) {
@@ -690,72 +571,6 @@
             return (n / (1024 * 1024)).toFixed(2) + ' MB';
         }
 
-        function updateMediaStats(inboundVideo, inboundAudio, codecs) {
-            const now = Date.now();
-            const v = document.getElementById('video');
-
-            if (inboundVideo) {
-                const width = inboundVideo.frameWidth || v.videoWidth;
-                const height = inboundVideo.frameHeight || v.videoHeight;
-                document.getElementById('videoResolution').textContent = (width && height) ? (width + ' x ' + height) : '—';
-
-                const codec = codecs[inboundVideo.codecId];
-                document.getElementById('videoCodec').textContent = codec
-                    ? (codec.mimeType || '—') + (codec.sdpFmtpLine ? ' (' + codec.sdpFmtpLine + ')' : '')
-                    : '—';
-
-                document.getElementById('videoFps').textContent = inboundVideo.framesPerSecond != null
-                    ? inboundVideo.framesPerSecond + ' fps'
-                    : '—';
-
-                document.getElementById('videoFrames').textContent =
-                    (inboundVideo.framesDecoded != null ? inboundVideo.framesDecoded : '—') + ' decoded / ' +
-                    (inboundVideo.framesDropped != null ? inboundVideo.framesDropped : '—') + ' dropped';
-
-                const lost = inboundVideo.packetsLost || 0;
-                const received = inboundVideo.packetsReceived || 0;
-                const total = lost + received;
-                document.getElementById('videoPacketLoss').textContent = total
-                    ? lost + ' / ' + total + ' (' + ((lost / total) * 100).toFixed(1) + '%)'
-                    : '—';
-
-                if (prevInboundVideoStats) {
-                    const dtSec = (now - prevInboundVideoStats.t) / 1000;
-                    if (dtSec > 0) {
-                        const mbps = ((inboundVideo.bytesReceived - prevInboundVideoStats.bytesReceived) * 8 / dtSec) / 1e6;
-                        document.getElementById('videoBitrate').textContent = mbps.toFixed(2) + ' Mbps';
-                    }
-                }
-                prevInboundVideoStats = { t: now, bytesReceived: inboundVideo.bytesReceived || 0 };
-            } else {
-                document.getElementById('videoResolution').textContent = '—';
-                document.getElementById('videoCodec').textContent = '—';
-                document.getElementById('videoFps').textContent = '—';
-                document.getElementById('videoBitrate').textContent = '—';
-                document.getElementById('videoFrames').textContent = '—';
-                document.getElementById('videoPacketLoss').textContent = '—';
-                prevInboundVideoStats = null;
-            }
-
-            if (inboundAudio) {
-                const codec = codecs[inboundAudio.codecId];
-                document.getElementById('audioCodec').textContent = codec ? (codec.mimeType || '—') : '—';
-
-                if (prevInboundAudioStats) {
-                    const dtSec = (now - prevInboundAudioStats.t) / 1000;
-                    if (dtSec > 0) {
-                        const mbps = ((inboundAudio.bytesReceived - prevInboundAudioStats.bytesReceived) * 8 / dtSec) / 1e6;
-                        document.getElementById('audioBitrate').textContent = mbps.toFixed(3) + ' Mbps';
-                    }
-                }
-                prevInboundAudioStats = { t: now, bytesReceived: inboundAudio.bytesReceived || 0 };
-            } else {
-                document.getElementById('audioCodec').textContent = '—';
-                document.getElementById('audioBitrate').textContent = '—';
-                prevInboundAudioStats = null;
-            }
-        }
-
         function stateToPill(state) {
             if (state === 'connected' || state === 'completed') return 'ok';
             if (state === 'failed' || state === 'disconnected' || state === 'closed') return 'bad';
@@ -763,264 +578,937 @@
             return 'info';
         }
 
-        function startStatsPolling() {
-            stopStatsPolling();
-            statsTimer = setInterval(refreshIceDiagnostics, 1500);
-            refreshIceDiagnostics();
-        }
-
-        function stopStatsPolling() {
-            if (statsTimer) {
-                clearInterval(statsTimer);
-                statsTimer = null;
+        function base64url(bytes) {
+            let base64;
+            if (typeof bytes === 'string') {
+                base64 = btoa(unescape(encodeURIComponent(bytes)));
+            } else {
+                base64 = btoa(String.fromCharCode.apply(null, new Uint8Array(bytes)));
             }
+            return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
         }
 
-        function connect() {
-            const url = document.getElementById('serverUrl').value.trim();
-            if (!url) { log('Enter server URL'); return; }
-
-            socket = io(url, { transports: ['websocket', 'polling'], timeout: 5000, forceNew: true });
-
-            setPill('pillSignaling', 'Signaling: connecting…', 'warn');
-
-            socket.on('connect', function() {
-                log('Connected');
-                setPill('pillSignaling', 'Signaling: connected', 'ok');
-                cameraUuid = getCameraUuid();
-                socket.emit('viewer_register', { viewer_id: viewerId, camera_uuid: cameraUuid });
-                log('Sent viewer_register for camera: ' + cameraUuid);
-                document.getElementById('connectBtn').disabled = true;
-                document.getElementById('disconnectBtn').disabled = false;
-            });
-
-            socket.on('disconnect', function(reason) {
-                log('Disconnected: ' + reason);
-                setPill('pillSignaling', 'Signaling: disconnected (' + reason + ')', 'bad');
-                cleanup();
-            });
-
-            socket.on('connect_error', function(err) {
-                log('Connection error: ' + err.message);
-                setPill('pillSignaling', 'Signaling: error', 'bad');
-                cleanup();
-            });
-
-            socket.on('viewer_register_ack', function(data) {
-                log('Registered: ' + JSON.stringify(data));
-                streamDataRef = Object.assign(streamDataRef, data);
-                if (data.status === 'failed') {
-                    log('Registration failed: ' + (data.error || 'unknown error'));
-                }
-            });
-
-            socket.on('stream_request_ack', function(data) {
-                log('Stream ack: ' + data.stream_id);
-                streamDataRef = Object.assign(streamDataRef, { stream_id: data.stream_id, session_id: data.session_id });
-            });
-
-            socket.on('webrtc_offer', function(data) {
-                if (data && data.data) handleOffer(data.data);
-            });
-
-            var recvCount = 0;
-            socket.on('webrtc_ice_candidate', function(data) {
-                if (data && data.data) {
-                    recvCount++;
-                    recordRemoteCandidate(data.data.candidate);
-                    log('ICE in #' + recvCount + ': ' + (data.data.candidate || '').substring(0, 72) + '…');
-                    handleIceCandidate(data.data);
-                    refreshIceDiagnostics();
-                }
-            });
-
-            socket.on('webrtc_message', function(data) {
-                if (data.data && data.data.sdp) handleOffer(data.data.sdp);
-                else if (data.data && data.data.ice) {
-                    recordRemoteCandidate(data.data.ice.candidate);
-                    handleIceCandidate(data.data.ice);
-                }
-            });
-
-            socket.on('stream_ended', function(data) {
-                log('Stream ended: ' + data.stream_id);
-                stopStream();
-            });
-
-            socket.on('stream_error', function(data) {
-                log('Stream error: ' + data.error);
-            });
+        async function hmacSha256(secret, data) {
+            const key = await crypto.subtle.importKey(
+                'raw',
+                new TextEncoder().encode(secret),
+                { name: 'HMAC', hash: 'SHA-256' },
+                false,
+                ['sign']
+            );
+            return crypto.subtle.sign('HMAC', key, new TextEncoder().encode(data));
         }
 
-        function disconnect() {
-            if (socket) socket.disconnect();
-            cleanup();
+        // Builds a LiveKit access token (HS256 JWT) directly in the browser — no backend
+        // needed for this tester, matching what a real viewer token request would contain.
+        async function buildLiveKitToken(opts) {
+            const header = { typ: 'JWT', alg: 'HS256' };
+            const now = Math.floor(Date.now() / 1000);
+            const payload = {
+                video: {
+                    roomJoin: true,
+                    room: opts.room,
+                    canPublish: false,
+                    canSubscribe: true,
+                    canPublishData: true
+                },
+                sub: opts.identity,
+                iss: opts.apiKey,
+                nbf: now,
+                exp: now + (opts.ttlSeconds || 3600)
+            };
+            const encodedHeader = base64url(JSON.stringify(header));
+            const encodedPayload = base64url(JSON.stringify(payload));
+            const signingInput = encodedHeader + '.' + encodedPayload;
+            const signature = await hmacSha256(opts.apiSecret, signingInput);
+            return signingInput + '.' + base64url(signature);
         }
 
-        function createPeerConnection() {
-            if (peerConnection) peerConnection.close();
-            localCandidates.length = 0;
-            remoteCandidates.length = 0;
-            iceConnectedAt = null;
-            offerReceivedAt = null;
-            dtlsConnectedAt = null;
-            srtpEstablishedAt = null;
-            firstFrameAt = null;
-            renderCandidateTables();
-            updateTimingDisplay();
+        function getCameraUuid() {
+            const el = document.getElementById('cameraUuid');
+            return (el && el.value.trim()) || 'CAM-TEST-001';
+        }
 
-            peerConnection = new RTCPeerConnection({ iceServers: parseIceServers() });
+        function updateRoomPreview() {
+            const el = document.getElementById('lk-lkRoomPreview');
+            if (el) el.textContent = 'room-' + getCameraUuid();
+        }
 
-            var sentCount = 0;
-            peerConnection.onicecandidate = function(event) {
-                if (event.candidate && socket && socket.connected) {
-                    sentCount++;
-                    recordLocalCandidate(event.candidate.candidate);
-                    log('ICE out #' + sentCount + ' [' + (parseCandidateLine(event.candidate.candidate)?.type || '?') + ']: ' +
-                        (event.candidate.candidate || '').substring(0, 72) + '…');
-                    var ref = streamDataRef || {};
-                    var payload = {
-                        viewer_id: ref.viewer_id || viewerId,
-                        camera_uuid: ref.camera_uuid || cameraUuid,
-                        stream_id: ref.stream_id,
-                        data: {
-                            candidate: event.candidate.candidate,
-                            sdpMLineIndex: event.candidate.sdpMLineIndex
+        // ---------------------------------------------------------------
+        // Per-channel factory — each channel (gateway / livekit) gets its
+        // own isolated state so both can run simultaneously without
+        // clobbering each other's peer connection, candidates, or timers.
+        // ---------------------------------------------------------------
+
+        function createChannel(prefix, mode) {
+            const state = {
+                socket: null,
+                peerConnection: null,
+                lkRoom: null,
+                viewerId: prefix + '_viewer_' + Math.random().toString(36).substr(2, 9),
+                streamDataRef: {},
+                pendingIceCandidates: [],
+                statsTimer: null,
+                iceConnectedAt: null,
+                offerReceivedAt: null,
+                dtlsConnectedAt: null,
+                srtpEstablishedAt: null,
+                firstFrameAt: null,
+                localCandidates: [],
+                remoteCandidates: [],
+                prevPairStats: {},
+                prevInboundVideoStats: null,
+                prevInboundAudioStats: null
+            };
+
+            function el(id) { return document.getElementById(prefix + '-' + id); }
+
+            function log(msg) {
+                const e = el('log');
+                if (!e) return;
+                e.textContent += '[' + new Date().toLocaleTimeString() + '] ' + msg + '\n';
+                e.scrollTop = e.scrollHeight;
+            }
+
+            function setPill(id, text, cls) {
+                const e = el(id);
+                if (!e) return;
+                e.textContent = text;
+                e.className = 'pill ' + (cls || 'info');
+            }
+
+            function renderCandidateTables() {
+                const localBody = el('localCandidatesTable');
+                const remoteBody = el('remoteCandidatesTable');
+                const remoteSource = mode === 'livekit' ? 'sfu' : 'gateway';
+                localBody.innerHTML = state.localCandidates.length
+                    ? state.localCandidates.map(function(c) { return formatCandidateRow(c, 'browser'); }).join('')
+                    : '<tr><td colspan="5" class="hint">No local candidates yet.</td></tr>';
+                remoteBody.innerHTML = state.remoteCandidates.length
+                    ? state.remoteCandidates.map(function(c) { return formatCandidateRow(c, remoteSource); }).join('')
+                    : '<tr><td colspan="5" class="hint">No remote candidates yet.</td></tr>';
+            }
+
+            function recordLocalCandidate(candidateStr) {
+                const parsed = parseCandidateLine(candidateStr);
+                if (!parsed) return;
+                if (!state.localCandidates.some(function(c) { return c.raw === parsed.raw; })) {
+                    state.localCandidates.push(parsed);
+                    renderCandidateTables();
+                }
+            }
+
+            function recordRemoteCandidate(candidateStr) {
+                const parsed = parseCandidateLine(candidateStr);
+                if (!parsed) return;
+                if (!state.remoteCandidates.some(function(c) { return c.raw === parsed.raw; })) {
+                    state.remoteCandidates.push(parsed);
+                    renderCandidateTables();
+                }
+            }
+
+            function recordCandidateFromReport(report, isLocal) {
+                if (!report || !report.address) return;
+                const parsed = candidateFromReport(report);
+                const list = isLocal ? state.localCandidates : state.remoteCandidates;
+                if (!list.some(function(c) { return c.raw === parsed.raw; })) {
+                    list.push(parsed);
+                    renderCandidateTables();
+                }
+            }
+
+            function summarizeAddresses() {
+                const localHost = state.localCandidates.find(function(c) { return c.type === 'host'; });
+                const localSrflx = state.localCandidates.find(function(c) { return c.type === 'srflx'; });
+                const remoteHost = state.remoteCandidates.find(function(c) { return c.type === 'host'; });
+                const remoteSrflx = state.remoteCandidates.find(function(c) { return c.type === 'srflx'; });
+                const remoteRelay = state.remoteCandidates.find(function(c) { return c.type === 'relay'; });
+
+                el('localHostAddr').textContent = localHost ? localHost.address + ':' + localHost.port : '—';
+                el('localPublicAddr').textContent = localSrflx
+                    ? localSrflx.address + ':' + localSrflx.port + ' (server reflexive via STUN)'
+                    : (state.localCandidates.length ? 'No srflx yet — STUN may be blocked or gathering incomplete' : '—');
+                el('remotePublicAddr').textContent = remoteSrflx
+                    ? remoteSrflx.address + ':' + remoteSrflx.port
+                    : (remoteRelay
+                        ? remoteRelay.address + ':' + remoteRelay.port + ' (TURN relay)'
+                        : (remoteHost ? remoteHost.address + ':' + remoteHost.port + ' (host only)' : '—'));
+            }
+
+            function buildRecommendations(ctx) {
+                const tips = [];
+                const ice = ctx.iceState;
+                const pcState = ctx.pcState;
+
+                if (!state.peerConnection) {
+                    return '<span class="hint">Connect to a stream to analyze connectivity.</span>';
+                }
+
+                if (ice === 'connected' || ice === 'completed') {
+                    tips.push('ICE is connected. If video is still black, check codec/decoder or media pipeline.');
+                }
+                if (ice === 'checking') {
+                    tips.push('ICE is still checking pairs. Wait a few seconds; UDP hole punching can take time on strict NATs.');
+                }
+                if (ice === 'failed' || pcState === 'failed') {
+                    tips.push('<strong>ICE failed.</strong> Try the steps below in order.');
+                }
+
+                const hasLocalSrflx = state.localCandidates.some(function(c) { return c.type === 'srflx'; });
+                const hasLocalRelay = state.localCandidates.some(function(c) { return c.type === 'relay'; });
+                const hasRemoteRelay = state.remoteCandidates.some(function(c) { return c.type === 'relay'; });
+                const remotePrivateHosts = state.remoteCandidates.filter(function(c) {
+                    return c.type === 'host' && isPrivateIp(c.address);
+                });
+                const remoteDocker = state.remoteCandidates.some(function(c) { return isDockerBridgeIp(c.address); });
+                const onlyHostPairs = !hasLocalSrflx && !hasLocalRelay && state.remoteCandidates.every(function(c) {
+                    return c.type === 'host';
+                });
+
+                if (!hasLocalSrflx && state.localCandidates.length > 0) {
+                    tips.push('Browser did not produce a <em>server reflexive (srflx)</em> candidate. STUN may be blocked by firewall, VPN, or corporate proxy. Allow outbound UDP to STUN (port 19302) or try another network.');
+                }
+                if (remoteDocker) {
+                    tips.push('Remote side advertised a <strong>Docker internal IP</strong> (192.168.65.x / 172.18.x). Your browser cannot reach that address. Run the SFU/gateway on the host network (not Docker bridge), or configure <strong>TURN relay</strong> on both sides.');
+                }
+                if (remotePrivateHosts.length && !hasRemoteRelay) {
+                    tips.push('Remote side only shared private host addresses (' + remotePrivateHosts.map(function(c) { return c.address; }).join(', ') + '). Unless you are on the same LAN, you need STUN srflx or TURN relay from the remote side.');
+                }
+                if (onlyHostPairs) {
+                    tips.push('Only <em>host</em> candidates on both sides — direct LAN connectivity required. For cross-network viewing, enable STUN on the remote side and TURN if symmetric NAT is present.');
+                }
+                if ((ice === 'failed' || pcState === 'failed') && !hasLocalRelay && !hasRemoteRelay) {
+                    tips.push('No <strong>TURN relay</strong> candidates were used. Add TURN servers to both sides ICE config for restrictive routers/NAT.');
+                }
+                if (ice === 'failed' || pcState === 'failed') {
+                    tips.push('Router / user actions that often fix ICE:');
+                    tips.push('Disable AP/client isolation on Wi‑Fi (devices must talk to each other).');
+                    tips.push('Enable UPnP or configure UDP port forwarding for the media ports if hosting at home.');
+                    tips.push('Avoid double NAT (modem + router both doing NAT); put the host in DMZ only if you understand the security tradeoff.');
+                    tips.push('Temporarily disable VPN, ad-blockers, or strict firewall rules blocking UDP.');
+                    tips.push('If on corporate network, ask IT to allow UDP/WebRTC or use TURN over TLS (turns:).');
+                }
+                if (ctx.failedPairs > 0 && ctx.succeededPairs === 0) {
+                    tips.push(ctx.failedPairs + ' candidate pair(s) failed with no successful pair. Typical causes: unreachable private IPs, UDP blocked, or NAT too strict.');
+                }
+                if (!tips.length) {
+                    tips.push('No issues detected yet. Keep this panel open while connecting.');
+                }
+
+                return '<ul><li>' + tips.join('</li><li>') + '</li></ul>';
+            }
+
+            function formatElapsed(at) {
+                if (!state.offerReceivedAt || !at) return '—';
+                return (at - state.offerReceivedAt) + ' ms';
+            }
+
+            function updateTimingDisplay() {
+                el('timingIce').textContent = formatElapsed(state.iceConnectedAt);
+                el('timingDtls').textContent = formatElapsed(state.dtlsConnectedAt);
+                el('timingSrtp').textContent = formatElapsed(state.srtpEstablishedAt);
+                el('timingFirstFrame').textContent = formatElapsed(state.firstFrameAt);
+            }
+
+            function updateMediaStats(inboundVideo, inboundAudio, codecs) {
+                const now = Date.now();
+                const v = el('video');
+
+                if (inboundVideo) {
+                    const width = inboundVideo.frameWidth || v.videoWidth;
+                    const height = inboundVideo.frameHeight || v.videoHeight;
+                    el('videoResolution').textContent = (width && height) ? (width + ' x ' + height) : '—';
+
+                    const codec = codecs[inboundVideo.codecId];
+                    el('videoCodec').textContent = codec
+                        ? (codec.mimeType || '—') + (codec.sdpFmtpLine ? ' (' + codec.sdpFmtpLine + ')' : '')
+                        : '—';
+
+                    el('videoFps').textContent = inboundVideo.framesPerSecond != null
+                        ? inboundVideo.framesPerSecond + ' fps'
+                        : '—';
+
+                    el('videoFrames').textContent =
+                        (inboundVideo.framesDecoded != null ? inboundVideo.framesDecoded : '—') + ' decoded / ' +
+                        (inboundVideo.framesDropped != null ? inboundVideo.framesDropped : '—') + ' dropped';
+
+                    const lost = inboundVideo.packetsLost || 0;
+                    const received = inboundVideo.packetsReceived || 0;
+                    const total = lost + received;
+                    el('videoPacketLoss').textContent = total
+                        ? lost + ' / ' + total + ' (' + ((lost / total) * 100).toFixed(1) + '%)'
+                        : '—';
+
+                    if (state.prevInboundVideoStats) {
+                        const dtSec = (now - state.prevInboundVideoStats.t) / 1000;
+                        if (dtSec > 0) {
+                            const mbps = ((inboundVideo.bytesReceived - state.prevInboundVideoStats.bytesReceived) * 8 / dtSec) / 1e6;
+                            el('videoBitrate').textContent = mbps.toFixed(2) + ' Mbps';
                         }
-                    };
-                    if (event.candidate.sdpMid) payload.data.sdpMid = event.candidate.sdpMid;
-                    socket.emit('webrtc_ice_candidate', payload);
-                    refreshIceDiagnostics();
-                } else if (!event.candidate) {
-                    log('Local ICE gathering complete');
-                    refreshIceDiagnostics();
-                }
-            };
-
-            peerConnection.onicegatheringstatechange = function() {
-                setPill('pillGathering', 'Gathering: ' + peerConnection.iceGatheringState, 'info');
-                refreshIceDiagnostics();
-            };
-
-            peerConnection.ontrack = function(event) {
-                var v = document.getElementById('video');
-                var stream = event.streams && event.streams[0] ? event.streams[0] : new MediaStream([event.track]);
-                v.srcObject = stream;
-                v.muted = true;
-                v.playsInline = true;
-                v.play().then(function() { log('Video playing'); }).catch(function(err) { log('Play error: ' + err.message); });
-                log('Track received');
-            };
-
-            peerConnection.onconnectionstatechange = function() {
-                log('PC state: ' + peerConnection.connectionState);
-                setPill('pillPc', 'PC: ' + peerConnection.connectionState, stateToPill(peerConnection.connectionState));
-                if (peerConnection.connectionState === 'failed') {
-                    log('WebRTC failed — see ICE Diagnostics recommendations');
-                    refreshIceDiagnostics();
-                }
-            };
-
-            peerConnection.oniceconnectionstatechange = function() {
-                var state = peerConnection.iceConnectionState;
-                log('ICE state: ' + state);
-                setPill('pillIce', 'ICE: ' + state, stateToPill(state));
-                if (state === 'connected' || state === 'completed') {
-                    if (!iceConnectedAt) iceConnectedAt = Date.now();
-                    var v = document.getElementById('video');
-                    if (v.srcObject) v.play().catch(function() {});
-                }
-                if (state === 'failed') {
-                    refreshIceDiagnostics();
-                }
-            };
-
-            startStatsPolling();
-        }
-
-        function handleOffer(sdp) {
-            if (!peerConnection) createPeerConnection();
-            offerReceivedAt = Date.now();
-
-            if (typeof sdp === 'string') sdp = { type: 'offer', sdp: sdp };
-            if (!sdp || sdp.type !== 'offer') return;
-
-            peerConnection.setRemoteDescription(new RTCSessionDescription(sdp))
-                .then(function() {
-                    if (pendingIceCandidates.length) {
-                        const pending = pendingIceCandidates.slice();
-                        pendingIceCandidates = [];
-                        return Promise.all(pending.map(function(ice) { return addIce(ice); }));
                     }
-                })
-                .then(function() { return peerConnection.createAnswer(); })
-                .then(function(answer) { return peerConnection.setLocalDescription(answer); })
-                .then(function() {
-                    var ref = streamDataRef || {};
-                    socket.emit('webrtc_answer', {
-                        viewer_id: ref.viewer_id || viewerId,
-                        camera_uuid: ref.camera_uuid || cameraUuid,
-                        stream_id: ref.stream_id,
-                        data: { type: 'answer', sdp: peerConnection.localDescription.sdp }
+                    state.prevInboundVideoStats = { t: now, bytesReceived: inboundVideo.bytesReceived || 0 };
+                } else {
+                    el('videoResolution').textContent = '—';
+                    el('videoCodec').textContent = '—';
+                    el('videoFps').textContent = '—';
+                    el('videoBitrate').textContent = '—';
+                    el('videoFrames').textContent = '—';
+                    el('videoPacketLoss').textContent = '—';
+                    state.prevInboundVideoStats = null;
+                }
+
+                if (inboundAudio) {
+                    const codec = codecs[inboundAudio.codecId];
+                    el('audioCodec').textContent = codec ? (codec.mimeType || '—') : '—';
+
+                    if (state.prevInboundAudioStats) {
+                        const dtSec = (now - state.prevInboundAudioStats.t) / 1000;
+                        if (dtSec > 0) {
+                            const mbps = ((inboundAudio.bytesReceived - state.prevInboundAudioStats.bytesReceived) * 8 / dtSec) / 1e6;
+                            el('audioBitrate').textContent = mbps.toFixed(3) + ' Mbps';
+                        }
+                    }
+                    state.prevInboundAudioStats = { t: now, bytesReceived: inboundAudio.bytesReceived || 0 };
+                } else {
+                    el('audioCodec').textContent = '—';
+                    el('audioBitrate').textContent = '—';
+                    state.prevInboundAudioStats = null;
+                }
+            }
+
+            async function refreshIceDiagnostics() {
+                if (!state.peerConnection) return;
+                const pc = state.peerConnection;
+
+                setPill('pillIce', 'ICE: ' + pc.iceConnectionState, stateToPill(pc.iceConnectionState));
+                setPill('pillPc', 'PC: ' + pc.connectionState, stateToPill(pc.connectionState));
+                setPill('pillGathering', 'Gathering: ' + pc.iceGatheringState, 'info');
+
+                summarizeAddresses();
+
+                const stats = await pc.getStats();
+                const candidates = {};
+                const pairs = [];
+                const codecs = {};
+                let selectedPairId = null;
+                let inboundVideo = null;
+                let inboundAudio = null;
+
+                stats.forEach(function(report) {
+                    if (report.type === 'local-candidate' || report.type === 'remote-candidate') {
+                        candidates[report.id] = report;
+                        recordCandidateFromReport(report, report.type === 'local-candidate');
+                    } else if (report.type === 'candidate-pair') {
+                        pairs.push(report);
+                    } else if (report.type === 'transport' && report.selectedCandidatePairId) {
+                        selectedPairId = report.selectedCandidatePairId;
+                    } else if (report.type === 'codec') {
+                        codecs[report.id] = report;
+                    } else if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                        inboundVideo = report;
+                    } else if (report.type === 'inbound-rtp' && report.kind === 'audio') {
+                        inboundAudio = report;
+                    }
+                });
+
+                if (!state.dtlsConnectedAt) {
+                    let dtlsTransport = null;
+                    const receivers = pc.getReceivers ? pc.getReceivers() : [];
+                    for (let ri = 0; ri < receivers.length; ri++) {
+                        if (receivers[ri].transport && receivers[ri].transport.state) {
+                            dtlsTransport = receivers[ri].transport;
+                            break;
+                        }
+                    }
+                    if (dtlsTransport && dtlsTransport.state === 'connected') {
+                        state.dtlsConnectedAt = Date.now();
+                        log('DTLS connected');
+                    }
+                }
+
+                if (!state.srtpEstablishedAt && inboundVideo && (inboundVideo.packetsReceived || 0) > 0) {
+                    state.srtpEstablishedAt = Date.now();
+                    log('SRTP established (first RTP packets decrypted)');
+                }
+
+                if (!state.firstFrameAt && inboundVideo && (inboundVideo.framesDecoded || 0) > 0) {
+                    state.firstFrameAt = Date.now();
+                    log('First frame decoded');
+                }
+
+                updateTimingDisplay();
+                updateMediaStats(inboundVideo, inboundAudio, codecs);
+
+                const succeededPairs = pairs.filter(function(p) { return p.state === 'succeeded'; }).length;
+                const failedPairs = pairs.filter(function(p) { return p.state === 'failed'; }).length;
+                const inProgressPairs = pairs.filter(function(p) {
+                    return p.state === 'in-progress' || p.state === 'waiting';
+                }).length;
+
+                setPill('pillPair', 'Pairs: ' + succeededPairs + ' ok / ' + failedPairs + ' failed / ' + inProgressPairs + ' pending',
+                    succeededPairs > 0 ? 'ok' : (failedPairs > 0 ? 'bad' : 'warn'));
+
+                const pairsBody = el('pairsTable');
+                if (!pairs.length) {
+                    pairsBody.innerHTML = '<tr><td colspan="8" class="hint">No candidate-pair stats yet.</td></tr>';
+                } else {
+                    pairs.sort(function(a, b) {
+                        if (a.selected) return -1;
+                        if (b.selected) return 1;
+                        if (a.state === 'succeeded') return -1;
+                        if (b.state === 'succeeded') return 1;
+                        return 0;
                     });
-                    log('Answer sent');
+                    const now = Date.now();
+                    pairsBody.innerHTML = pairs.map(function(pair) {
+                        const local = candidates[pair.localCandidateId];
+                        const remote = candidates[pair.remoteCandidateId];
+                        const localTxt = local ? (local.candidateType + ' ' + local.address + ':' + local.port) : '?';
+                        const remoteTxt = remote ? (remote.candidateType + ' ' + remote.address + ':' + remote.port) : '?';
+                        const rtt = pair.currentRoundTripTime != null
+                            ? Math.round(pair.currentRoundTripTime * 1000) + ' ms'
+                            : '—';
+
+                        const bytesReceived = pair.bytesReceived || 0;
+                        const bytesSent = pair.bytesSent || 0;
+                        const prev = state.prevPairStats[pair.id];
+                        let mbpsIn = null, mbpsOut = null;
+                        if (prev) {
+                            const dtSec = (now - prev.t) / 1000;
+                            if (dtSec > 0) {
+                                mbpsIn = ((bytesReceived - prev.bytesReceived) * 8 / dtSec) / 1e6;
+                                mbpsOut = ((bytesSent - prev.bytesSent) * 8 / dtSec) / 1e6;
+                            }
+                        }
+                        state.prevPairStats[pair.id] = { t: now, bytesReceived: bytesReceived, bytesSent: bytesSent };
+
+                        const result = pair.state === 'succeeded' ? 'SUCCESS'
+                            : (pair.state === 'failed' ? 'FAILED' : (pair.state || '—').toUpperCase());
+
+                        const notes = [];
+                        if (pair.selected || pair.id === selectedPairId) notes.push('SELECTED');
+                        if (pair.nominated) notes.push('nominated');
+                        if (remote && isDockerBridgeIp(remote.address)) notes.push('remote Docker IP');
+                        if (remote && isPrivateIp(remote.address) && remote.candidateType === 'host') notes.push('private host');
+                        return '<tr>' +
+                            '<td class="' + pairStateClass(pair.state) + '">' + result + '</td>' +
+                            '<td class="' + candidateTypeClass(local && local.candidateType) + '">' + localTxt + '</td>' +
+                            '<td class="' + candidateTypeClass(remote && remote.candidateType) + '">' + remoteTxt + '</td>' +
+                            '<td>' + rtt + '</td>' +
+                            '<td>' + formatBytes(bytesReceived) + '</td>' +
+                            '<td>' + formatBytes(bytesSent) + '</td>' +
+                            '<td>' + (mbpsIn != null ? (mbpsIn.toFixed(2) + ' / ' + mbpsOut.toFixed(2)) : '—') + '</td>' +
+                            '<td>' + (notes.join(', ') || '—') + '</td>' +
+                            '</tr>';
+                    }).join('');
+                }
+
+                const selected = pairs.find(function(p) { return p.selected || p.id === selectedPairId; });
+                const selectedBox = el('selectedPairBox');
+                const selectedDetails = el('selectedPairDetails');
+                if (selected) {
+                    const local = candidates[selected.localCandidateId];
+                    const remote = candidates[selected.remoteCandidateId];
+                    selectedBox.style.display = 'block';
+                    selectedDetails.innerHTML =
+                        '<div><strong>Local:</strong> ' + (local ? local.candidateType + ' ' + local.address + ':' + local.port + ' (' + local.protocol + ')' : '—') + '</div>' +
+                        '<div><strong>Remote:</strong> ' + (remote ? remote.candidateType + ' ' + remote.address + ':' + remote.port + ' (' + remote.protocol + ')' : '—') + '</div>' +
+                        '<div><strong>Pair state:</strong> ' + selected.state + (selected.nominated ? ' (nominated)' : '') + '</div>';
+                } else {
+                    selectedBox.style.display = 'none';
+                }
+
+                if (state.iceConnectedAt) {
+                    el('iceConnectTime').textContent = (Date.now() - state.iceConnectedAt) + ' ms since ICE connected';
+                } else if (state.offerReceivedAt) {
+                    el('iceConnectTime').textContent = (Date.now() - state.offerReceivedAt) + ' ms since offer (not connected yet)';
+                }
+
+                el('recommendations').innerHTML = buildRecommendations({
+                    iceState: pc.iceConnectionState,
+                    pcState: pc.connectionState,
+                    succeededPairs: succeededPairs,
+                    failedPairs: failedPairs
+                });
+
+                renderComparisonReport();
+            }
+
+            function startStatsPolling() {
+                stopStatsPolling();
+                state.statsTimer = setInterval(refreshIceDiagnostics, 1500);
+                refreshIceDiagnostics();
+            }
+
+            function stopStatsPolling() {
+                if (state.statsTimer) {
+                    clearInterval(state.statsTimer);
+                    state.statsTimer = null;
+                }
+            }
+
+            // ---- gateway (P2P) specifics ----
+
+            function parseIceServers() {
+                const raw = el('stunServers').value.trim();
+                if (!raw) return [{ urls: 'stun:stun.l.google.com:19302' }];
+                return raw.split(',').map(function(u) { return { urls: u.trim() }; }).filter(function(s) { return s.urls; });
+            }
+
+            function connectGateway() {
+                const url = el('serverUrl').value.trim();
+                if (!url) { log('Enter server URL'); return; }
+
+                state.socket = io(url, { transports: ['websocket', 'polling'], timeout: 5000, forceNew: true });
+
+                setPill('pillSignaling', 'Signaling: connecting…', 'warn');
+
+                state.socket.on('connect', function() {
+                    log('Connected');
+                    setPill('pillSignaling', 'Signaling: connected', 'ok');
+                    const camUuid = getCameraUuid();
+                    state.socket.emit('viewer_register', { viewer_id: state.viewerId, camera_uuid: camUuid });
+                    log('Sent viewer_register for camera: ' + camUuid);
+                    el('connectBtn').disabled = true;
+                    el('disconnectBtn').disabled = false;
+                });
+
+                state.socket.on('disconnect', function(reason) {
+                    log('Disconnected: ' + reason);
+                    setPill('pillSignaling', 'Signaling: disconnected (' + reason + ')', 'bad');
+                    cleanup();
+                });
+
+                state.socket.on('connect_error', function(err) {
+                    log('Connection error: ' + err.message);
+                    setPill('pillSignaling', 'Signaling: error', 'bad');
+                    cleanup();
+                });
+
+                state.socket.on('viewer_register_ack', function(data) {
+                    log('Registered: ' + JSON.stringify(data));
+                    state.streamDataRef = Object.assign(state.streamDataRef, data);
+                    if (data.status === 'failed') {
+                        log('Registration failed: ' + (data.error || 'unknown error'));
+                    }
+                });
+
+                state.socket.on('stream_request_ack', function(data) {
+                    log('Stream ack: ' + data.stream_id);
+                    state.streamDataRef = Object.assign(state.streamDataRef, { stream_id: data.stream_id, session_id: data.session_id });
+                });
+
+                state.socket.on('webrtc_offer', function(data) {
+                    if (data && data.data) handleOffer(data.data);
+                });
+
+                var recvCount = 0;
+                state.socket.on('webrtc_ice_candidate', function(data) {
+                    if (data && data.data) {
+                        recvCount++;
+                        recordRemoteCandidate(data.data.candidate);
+                        log('ICE in #' + recvCount + ': ' + (data.data.candidate || '').substring(0, 72) + '…');
+                        handleIceCandidate(data.data);
+                        refreshIceDiagnostics();
+                    }
+                });
+
+                state.socket.on('webrtc_message', function(data) {
+                    if (data.data && data.data.sdp) handleOffer(data.data.sdp);
+                    else if (data.data && data.data.ice) {
+                        recordRemoteCandidate(data.data.ice.candidate);
+                        handleIceCandidate(data.data.ice);
+                    }
+                });
+
+                state.socket.on('stream_ended', function(data) {
+                    log('Stream ended: ' + data.stream_id);
+                    stopStream();
+                });
+
+                state.socket.on('stream_error', function(data) {
+                    log('Stream error: ' + data.error);
+                });
+            }
+
+            function createPeerConnection() {
+                if (state.peerConnection) state.peerConnection.close();
+                state.localCandidates.length = 0;
+                state.remoteCandidates.length = 0;
+                state.iceConnectedAt = null;
+                state.offerReceivedAt = null;
+                state.dtlsConnectedAt = null;
+                state.srtpEstablishedAt = null;
+                state.firstFrameAt = null;
+                renderCandidateTables();
+                updateTimingDisplay();
+
+                const pc = new RTCPeerConnection({ iceServers: parseIceServers() });
+                pc.__gwOwned = true; // exclude from the LiveKit channel's subscriber-PC search
+                state.peerConnection = pc;
+
+                var sentCount = 0;
+                pc.onicecandidate = function(event) {
+                    if (event.candidate && state.socket && state.socket.connected) {
+                        sentCount++;
+                        recordLocalCandidate(event.candidate.candidate);
+                        const parsedType = (parseCandidateLine(event.candidate.candidate) || {}).type || '?';
+                        log('ICE out #' + sentCount + ' [' + parsedType + ']: ' +
+                            (event.candidate.candidate || '').substring(0, 72) + '…');
+                        const ref = state.streamDataRef || {};
+                        const payload = {
+                            viewer_id: ref.viewer_id || state.viewerId,
+                            camera_uuid: ref.camera_uuid || getCameraUuid(),
+                            stream_id: ref.stream_id,
+                            data: {
+                                candidate: event.candidate.candidate,
+                                sdpMLineIndex: event.candidate.sdpMLineIndex
+                            }
+                        };
+                        if (event.candidate.sdpMid) payload.data.sdpMid = event.candidate.sdpMid;
+                        state.socket.emit('webrtc_ice_candidate', payload);
+                        refreshIceDiagnostics();
+                    } else if (!event.candidate) {
+                        log('Local ICE gathering complete');
+                        refreshIceDiagnostics();
+                    }
+                };
+
+                pc.onicegatheringstatechange = function() {
+                    setPill('pillGathering', 'Gathering: ' + pc.iceGatheringState, 'info');
                     refreshIceDiagnostics();
-                })
-                .catch(function(err) { log('Offer error: ' + err.message); });
+                };
+
+                pc.ontrack = function(event) {
+                    const v = el('video');
+                    const stream = event.streams && event.streams[0] ? event.streams[0] : new MediaStream([event.track]);
+                    v.srcObject = stream;
+                    v.muted = true;
+                    v.playsInline = true;
+                    v.play().then(function() { log('Video playing'); }).catch(function(err) { log('Play error: ' + err.message); });
+                    log('Track received');
+                };
+
+                pc.onconnectionstatechange = function() {
+                    log('PC state: ' + pc.connectionState);
+                    setPill('pillPc', 'PC: ' + pc.connectionState, stateToPill(pc.connectionState));
+                    if (pc.connectionState === 'failed') {
+                        log('WebRTC failed — see recommendations');
+                        refreshIceDiagnostics();
+                    }
+                };
+
+                pc.oniceconnectionstatechange = function() {
+                    const s = pc.iceConnectionState;
+                    log('ICE state: ' + s);
+                    setPill('pillIce', 'ICE: ' + s, stateToPill(s));
+                    if (s === 'connected' || s === 'completed') {
+                        if (!state.iceConnectedAt) state.iceConnectedAt = Date.now();
+                        const v = el('video');
+                        if (v.srcObject) v.play().catch(function() {});
+                    }
+                    if (s === 'failed') refreshIceDiagnostics();
+                };
+
+                startStatsPolling();
+            }
+
+            function handleOffer(sdp) {
+                if (!state.peerConnection) createPeerConnection();
+                state.offerReceivedAt = Date.now();
+
+                if (typeof sdp === 'string') sdp = { type: 'offer', sdp: sdp };
+                if (!sdp || sdp.type !== 'offer') return;
+
+                state.peerConnection.setRemoteDescription(new RTCSessionDescription(sdp))
+                    .then(function() {
+                        if (state.pendingIceCandidates.length) {
+                            const pending = state.pendingIceCandidates.slice();
+                            state.pendingIceCandidates = [];
+                            return Promise.all(pending.map(function(ice) { return addIce(ice); }));
+                        }
+                    })
+                    .then(function() { return state.peerConnection.createAnswer(); })
+                    .then(function(answer) { return state.peerConnection.setLocalDescription(answer); })
+                    .then(function() {
+                        const ref = state.streamDataRef || {};
+                        state.socket.emit('webrtc_answer', {
+                            viewer_id: ref.viewer_id || state.viewerId,
+                            camera_uuid: ref.camera_uuid || getCameraUuid(),
+                            stream_id: ref.stream_id,
+                            data: { type: 'answer', sdp: state.peerConnection.localDescription.sdp }
+                        });
+                        log('Answer sent');
+                        refreshIceDiagnostics();
+                    })
+                    .catch(function(err) { log('Offer error: ' + err.message); });
+            }
+
+            function handleIceCandidate(ice) {
+                if (!state.peerConnection || !state.peerConnection.remoteDescription || !state.peerConnection.remoteDescription.type) {
+                    state.pendingIceCandidates.push(ice);
+                    return;
+                }
+                addIce(ice);
+            }
+
+            function addIce(ice) {
+                recordRemoteCandidate(ice.candidate);
+                const init = { candidate: ice.candidate, sdpMLineIndex: ice.sdpMLineIndex };
+                if (ice.sdpMid) init.sdpMid = ice.sdpMid;
+                return state.peerConnection.addIceCandidate(new RTCIceCandidate(init)).catch(function(err) {
+                    log('ICE add error: ' + err.message);
+                });
+            }
+
+            // ---- cloud (LiveKit) specifics ----
+
+            // Find the SFU-facing subscriber peer connection among all captured
+            // RTCPeerConnection instances, excluding any created by a gateway channel.
+            // The subscriber is the one with receivers that carry live tracks.
+            function getSubscriberPc(allowFallback) {
+                const list = (window.__pcInstances || []).filter(function(pc) { return !pc.__gwOwned; });
+                for (let i = list.length - 1; i >= 0; i--) {
+                    const pc = list[i];
+                    try {
+                        const recvs = pc.getReceivers ? pc.getReceivers() : [];
+                        if (recvs.some(function(r) { return r.track; })) return pc;
+                    } catch (e) {}
+                }
+                return allowFallback && list.length ? list[list.length - 1] : null;
+            }
+
+            function attachLiveKitPeerConnection(attempt) {
+                attempt = attempt || 0;
+                const pc = getSubscriberPc(attempt > 20);
+                if (!pc) {
+                    if (attempt > 25) { log('Could not find LiveKit subscriber RTCPeerConnection to attach diagnostics to'); return; }
+                    setTimeout(function() { attachLiveKitPeerConnection(attempt + 1); }, 300);
+                    return;
+                }
+                if (state.peerConnection === pc) return;
+
+                state.peerConnection = pc;
+                state.localCandidates.length = 0;
+                state.remoteCandidates.length = 0;
+                renderCandidateTables();
+
+                pc.addEventListener('iceconnectionstatechange', function() {
+                    const s = pc.iceConnectionState;
+                    log('ICE state: ' + s);
+                    setPill('pillIce', 'ICE: ' + s, stateToPill(s));
+                    if ((s === 'connected' || s === 'completed') && !state.iceConnectedAt) state.iceConnectedAt = Date.now();
+                    if (s === 'failed') refreshIceDiagnostics();
+                });
+                pc.addEventListener('connectionstatechange', function() {
+                    log('PC state: ' + pc.connectionState);
+                    setPill('pillPc', 'PC: ' + pc.connectionState, stateToPill(pc.connectionState));
+                });
+                pc.addEventListener('icegatheringstatechange', function() {
+                    setPill('pillGathering', 'Gathering: ' + pc.iceGatheringState, 'info');
+                });
+
+                log('Attached diagnostics to LiveKit subscriber peer connection');
+                startStatsPolling();
+            }
+
+            async function connectLiveKit() {
+                const wsUrl = el('lkUrl').value.trim();
+                const apiKey = el('lkApiKey').value.trim();
+                const apiSecret = el('lkApiSecret').value.trim();
+                const identity = el('lkIdentity').value.trim() || ('viewer-' + Math.random().toString(36).substr(2, 6));
+                const camUuid = getCameraUuid();
+                const roomName = 'room-' + camUuid;
+                updateRoomPreview();
+
+                if (!wsUrl || !apiKey || !apiSecret) {
+                    log('Fill in LiveKit URL, API key, and API secret first.');
+                    return;
+                }
+
+                state.iceConnectedAt = null;
+                state.offerReceivedAt = null;
+                state.dtlsConnectedAt = null;
+                state.srtpEstablishedAt = null;
+                state.firstFrameAt = null;
+                updateTimingDisplay();
+
+                setPill('pillSignaling', 'Signaling: connecting…', 'warn');
+                log('Generating LiveKit token for room "' + roomName + '" as ' + identity);
+
+                try {
+                    const token = await buildLiveKitToken({ apiKey: apiKey, apiSecret: apiSecret, room: roomName, identity: identity });
+
+                    state.lkRoom = new LivekitClient.Room({ adaptiveStream: true, dynacast: true });
+
+                    state.lkRoom.on(LivekitClient.RoomEvent.Connected, function() {
+                        setPill('pillSignaling', 'Signaling: connected', 'ok');
+                        log('LiveKit connected to room: ' + state.lkRoom.name);
+                        state.offerReceivedAt = Date.now();
+                        attachLiveKitPeerConnection();
+                    });
+
+                    state.lkRoom.on(LivekitClient.RoomEvent.Disconnected, function(reason) {
+                        log('LiveKit disconnected: ' + reason);
+                        setPill('pillSignaling', 'Signaling: disconnected (' + reason + ')', 'bad');
+                        cleanup();
+                    });
+
+                    state.lkRoom.on(LivekitClient.RoomEvent.TrackSubscribed, function(track, publication, participant) {
+                        log('Track subscribed: ' + track.kind + ' from ' + participant.identity);
+                        if (track.kind === 'video' || track.kind === 'audio') {
+                            const v = el('video');
+                            if (!v.srcObject) v.srcObject = new MediaStream();
+                            v.srcObject.addTrack(track.mediaStreamTrack);
+                            v.muted = true;
+                            v.playsInline = true;
+                            v.play().then(function() { log('Video playing'); }).catch(function(err) { log('Play error: ' + err.message); });
+                        }
+                        // A track is now flowing, so the receiving PC definitely exists — (re)attach.
+                        attachLiveKitPeerConnection();
+                    });
+
+                    state.lkRoom.on(LivekitClient.RoomEvent.TrackUnsubscribed, function(track) {
+                        log('Track unsubscribed: ' + track.kind);
+                        track.detach();
+                    });
+
+                    await state.lkRoom.connect(wsUrl, token);
+
+                    el('connectBtn').disabled = true;
+                    el('disconnectBtn').disabled = false;
+                } catch (err) {
+                    log('LiveKit connect error: ' + err.message);
+                    setPill('pillSignaling', 'Signaling: error', 'bad');
+                }
+            }
+
+            // ---- shared connect / disconnect / stop / cleanup ----
+
+            function connect() {
+                if (mode === 'livekit') connectLiveKit();
+                else connectGateway();
+            }
+
+            function disconnect() {
+                if (mode === 'livekit') {
+                    if (state.lkRoom) state.lkRoom.disconnect();
+                    else cleanup();
+                    return;
+                }
+                if (state.socket) state.socket.disconnect();
+                cleanup();
+            }
+
+            function stopStream() {
+                stopStatsPolling();
+                if (state.peerConnection) {
+                    // In LiveKit mode this PC is owned/closed by the Room itself; only close
+                    // it ourselves when we created it directly (gateway/P2P mode).
+                    if (mode !== 'livekit') state.peerConnection.close();
+                    state.peerConnection = null;
+                }
+                state.pendingIceCandidates = [];
+                const v = el('video');
+                if (v && v.srcObject) {
+                    v.srcObject.getTracks().forEach(function(t) { try { t.stop(); } catch (e) {} });
+                    v.srcObject = null;
+                }
+                setPill('pillSignaling', 'Signaling: —', 'info');
+                setPill('pillIce', 'ICE: —', 'info');
+                setPill('pillPc', 'PC: —', 'info');
+                setPill('pillGathering', 'Gathering: —', 'info');
+                setPill('pillPair', 'Selected pair: —', 'info');
+                state.iceConnectedAt = null;
+                state.offerReceivedAt = null;
+                state.dtlsConnectedAt = null;
+                state.srtpEstablishedAt = null;
+                state.firstFrameAt = null;
+                updateTimingDisplay();
+                updateMediaStats(null, null, {});
+                renderComparisonReport();
+            }
+
+            function cleanup() {
+                stopStream();
+                state.socket = null;
+                state.lkRoom = null;
+                el('connectBtn').disabled = false;
+                el('disconnectBtn').disabled = true;
+            }
+
+            return { connect: connect, disconnect: disconnect, refreshIceDiagnostics: refreshIceDiagnostics, state: state, mode: mode };
         }
 
-        function handleIceCandidate(ice) {
-            if (!peerConnection) {
-                pendingIceCandidates.push(ice);
-                return;
+        // ---------------------------------------------------------------
+        // Side-by-side comparison report
+        // ---------------------------------------------------------------
+
+        function captureSnapshot(prefix) {
+            function t(id) {
+                const e = document.getElementById(prefix + '-' + id);
+                return e ? e.textContent : '—';
             }
-            if (!peerConnection.remoteDescription || !peerConnection.remoteDescription.type) {
-                pendingIceCandidates.push(ice);
-                return;
-            }
-            addIce(ice);
+            return {
+                signaling: t('pillSignaling'), ice: t('pillIce'), pc: t('pillPc'), gathering: t('pillGathering'), pair: t('pillPair'),
+                iceConnectTime: t('timingIce'), dtls: t('timingDtls'), srtp: t('timingSrtp'), firstFrame: t('timingFirstFrame'),
+                resolution: t('videoResolution'), codec: t('videoCodec'), fps: t('videoFps'), bitrate: t('videoBitrate'),
+                audioCodec: t('audioCodec'), audioBitrate: t('audioBitrate'), frames: t('videoFrames'), loss: t('videoPacketLoss')
+            };
         }
 
-        function addIce(ice) {
-            recordRemoteCandidate(ice.candidate);
-            var init = { candidate: ice.candidate, sdpMLineIndex: ice.sdpMLineIndex };
-            if (ice.sdpMid) init.sdpMid = ice.sdpMid;
-            return peerConnection.addIceCandidate(new RTCIceCandidate(init)).catch(function(err) {
-                log('ICE add error: ' + err.message);
-            });
+        function renderComparisonReport() {
+            const gw = captureSnapshot('gw');
+            const lk = captureSnapshot('lk');
+            const rows = [
+                ['Signaling', gw.signaling, lk.signaling],
+                ['ICE state', gw.ice, lk.ice],
+                ['PC state', gw.pc, lk.pc],
+                ['Gathering', gw.gathering, lk.gathering],
+                ['Candidate pairs', gw.pair, lk.pair],
+                ['ICE connect time', gw.iceConnectTime, lk.iceConnectTime],
+                ['DTLS handshake', gw.dtls, lk.dtls],
+                ['SRTP established', gw.srtp, lk.srtp],
+                ['First frame received', gw.firstFrame, lk.firstFrame],
+                ['Video resolution', gw.resolution, lk.resolution],
+                ['Video codec', gw.codec, lk.codec],
+                ['Frame rate', gw.fps, lk.fps],
+                ['Video bitrate', gw.bitrate, lk.bitrate],
+                ['Audio codec', gw.audioCodec, lk.audioCodec],
+                ['Audio bitrate', gw.audioBitrate, lk.audioBitrate],
+                ['Frames decoded/dropped', gw.frames, lk.frames],
+                ['Packet loss (video)', gw.loss, lk.loss]
+            ];
+            const body = document.getElementById('reportTable');
+            if (!body) return;
+            body.innerHTML = rows.map(function(r) {
+                return '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td><td>' + r[2] + '</td></tr>';
+            }).join('');
         }
 
-        function stopStream() {
-            stopStatsPolling();
-            if (peerConnection) {
-                peerConnection.close();
-                peerConnection = null;
-            }
-            pendingIceCandidates = [];
-            var v = document.getElementById('video');
-            if (v.srcObject) {
-                v.srcObject.getTracks().forEach(function(t) { try { t.stop(); } catch(e) {} });
-                v.srcObject = null;
-            }
-            setPill('pillIce', 'ICE: —', 'info');
-            setPill('pillPc', 'PC: —', 'info');
-            setPill('pillGathering', 'Gathering: —', 'info');
-            setPill('pillPair', 'Selected pair: —', 'info');
-            iceConnectedAt = null;
-            offerReceivedAt = null;
-            dtlsConnectedAt = null;
-            srtpEstablishedAt = null;
-            firstFrameAt = null;
-            updateTimingDisplay();
-            updateMediaStats(null, null, {});
+        // ---------------------------------------------------------------
+        // Instantiate both channels
+        // ---------------------------------------------------------------
+
+        const gwChannel = createChannel('gw', 'gateway');
+        const lkChannel = createChannel('lk', 'livekit');
+
+        function connectBoth() {
+            document.getElementById('connectBothBtn').disabled = true;
+            document.getElementById('disconnectBothBtn').disabled = false;
+            gwChannel.connect();
+            lkChannel.connect();
         }
 
-        function cleanup() {
-            stopStream();
-            socket = null;
-            document.getElementById('connectBtn').disabled = false;
-            document.getElementById('disconnectBtn').disabled = true;
+        function disconnectBoth() {
+            gwChannel.disconnect();
+            lkChannel.disconnect();
+            document.getElementById('connectBothBtn').disabled = false;
+            document.getElementById('disconnectBothBtn').disabled = true;
         }
+
+        updateRoomPreview();
+        renderComparisonReport();
     </script>
 </body>
 </html>
